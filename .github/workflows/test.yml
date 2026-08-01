@@ -29,3 +29,29 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build menu bar app
         run: ./macos-widget/build-widget.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Parse PowerShell scripts
+        shell: powershell
+        run: |
+          $installErrors = @()
+          $widgetErrors = @()
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "install.ps1"), [ref]$null, [ref]$installErrors
+          ) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "windows-widget/CodexAutoRouter.ps1"), [ref]$null, [ref]$widgetErrors
+          ) | Out-Null
+          $parseErrors = @($installErrors) + @($widgetErrors)
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+      - name: Test router on Windows
+        run: python -m unittest discover -s tests -v

@@ -60,6 +60,22 @@ Keep recommendations and next-turn monitoring but never block and replay a user 
 "prompt_submit_reroute": false
 ```
 
+## Weekly usage guard
+
+The guard is disabled by default. It can be changed from either desktop dashboard or directly in JSON:
+
+```json
+"usage_guard": {
+  "enabled": true,
+  "pause_at_remaining_percent": 10,
+  "max_cache_age_seconds": 300,
+  "query_timeout_seconds": 3,
+  "mode": "safe_turn_boundary"
+}
+```
+
+Safe-boundary mode does not interrupt an active edit or tool call. It blocks new prompts and automatic continuation after current turns finish. `usage_poll_interval_seconds` controls background refresh frequency; lowering it does not use model tokens but does create more local account-status requests.
+
 ## Use different model slugs
 
 Replace the `model` fields in `routes` and update `model_capabilities`. The router clamps an unsupported effort to the highest effort declared for that model.

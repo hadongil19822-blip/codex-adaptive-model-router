@@ -28,6 +28,14 @@
   },
   "poll_interval_seconds": 0.25,
   "discovery_interval_seconds": 5,
+  "usage_poll_interval_seconds": 300,
+  "usage_guard": {
+    "enabled": false,
+    "pause_at_remaining_percent": 10,
+    "max_cache_age_seconds": 300,
+    "query_timeout_seconds": 3,
+    "mode": "safe_turn_boundary"
+  },
   "activity_window_seconds": 1800,
   "initial_tail_bytes": 33554432,
   "excluded_thread_ids": [],
@@ -47,5 +55,5 @@
   "fallback_notifications": true,
   "notification_cooldown_seconds": 300,
   "goal_query_timeout_seconds": 5,
-  "continuation_prompt": "활성 목표를 계속 진행하세요. 직전에 선언한 다음 작업을 우선 수행하고, 전체 목표를 유지하세요."
+  "continuation_prompt": "Continue the active goal. Prioritize the next step announced immediately before this turn while preserving the overall objective."
 }
