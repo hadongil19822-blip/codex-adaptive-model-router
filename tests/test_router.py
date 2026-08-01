@@ -405,7 +405,7 @@ Continue working toward the active thread goal.
     def test_failed_mcp_result_is_failure(self):
         self.assertTrue(router.matches_any(router.FAILURE_PATTERNS, '{"isError": true}'))
 
-    def test_manual_notification_contains_recommended_model_and_korean_effort(self):
+    def test_manual_notification_contains_recommended_model_and_english_effort(self):
         with patch.object(router, "OSASCRIPT_BIN", Path("/usr/bin/true")):
             with patch.object(router.subprocess, "Popen") as popen:
                 self.assertTrue(
@@ -417,8 +417,61 @@ Continue working toward the active thread goal.
                 )
         command = popen.call_args.args[0]
         rendered_command = "\n".join(command)
-        self.assertIn("gpt-5.6-sol · 사고 강도 높음을 사용하세요.", rendered_command)
-        self.assertIn("코덱스 모델 추천", rendered_command)
+        self.assertIn("Use gpt-5.6-sol with High reasoning.", rendered_command)
+        self.assertIn("Codex model recommendation", rendered_command)
+
+    def test_weekly_usage_uses_codex_longest_window(self):
+        usage = router.parse_weekly_usage({
+            "rateLimits": {
+                "limitId": "codex",
+                "planType": "pro",
+                "primary": {
+                    "usedPercent": 16,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 123456,
+                },
+                "secondary": {"usedPercent": 50, "windowDurationMins": 300},
+            },
+            "rateLimitResetCredits": {"availableCount": 1},
+        })
+        self.assertTrue(usage.available)
+        self.assertEqual(usage.remaining_percent, 84)
+        self.assertEqual(usage.window_duration_mins, 10080)
+        self.assertEqual(usage.reset_credits, 1)
+
+    def test_usage_guard_is_opt_in_and_pauses_at_threshold(self):
+        usage = router.UsageSnapshot(available=True, remaining_percent=9)
+        self.assertFalse(router.usage_guard_is_paused(self.config, usage))
+        enabled = {
+            **self.config,
+            "usage_guard": {"enabled": True, "pause_at_remaining_percent": 10},
+        }
+        self.assertTrue(router.usage_guard_is_paused(enabled, usage))
+
+    def test_usage_guard_blocks_a_new_prompt_before_routing(self):
+        hook_input = {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "thread-guard-test",
+            "prompt": "Use gpt-5.6-sol to implement this feature",
+        }
+        enabled = {
+            **self.config,
+            "usage_guard": {"enabled": True, "pause_at_remaining_percent": 10},
+        }
+        with patch.object(router, "load_config", return_value=enabled):
+            with patch.object(
+                router,
+                "cached_weekly_usage",
+                return_value=router.UsageSnapshot(available=True, remaining_percent=8),
+            ):
+                with patch.object(router.sys, "stdin", io.StringIO(json.dumps(hook_input))):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        result = router.run_prompt_submit_hook()
+        self.assertEqual(result, 0)
+        response = json.loads(output.getvalue())
+        self.assertEqual(response["decision"], "block")
+        self.assertIn("8% remaining", response["reason"])
 
     def test_goal_blocked_sends_fallback_notification_once(self):
         state = router.RouterState(

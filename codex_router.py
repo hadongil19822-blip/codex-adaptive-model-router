@@ -31,6 +31,7 @@ ROOT = Path(os.environ.get("CODEX_ROUTER_ROOT") or Path(__file__).resolve().pare
 RUNTIME_DIR = ROOT / "runtime"
 CONFIG_PATH = ROOT / "router_config.json"
 STATE_PATH = RUNTIME_DIR / "state.json"
+USAGE_PATH = RUNTIME_DIR / "usage.json"
 PID_PATH = RUNTIME_DIR / "watcher.pid"
 LOG_PATH = RUNTIME_DIR / "watcher.log"
 AUTO_RUN_DIR = RUNTIME_DIR / "auto-runs"
@@ -38,7 +39,8 @@ PROMPT_ROUTE_DIR = RUNTIME_DIR / "prompt-routes"
 SESSION_ROOT = Path.home() / ".codex" / "sessions"
 _codex_candidate = os.environ.get("CODEX_BIN") or shutil.which("codex")
 if not _codex_candidate:
-    _codex_candidate = "/Applications/ChatGPT.app/Contents/Resources/codex"
+    macos_codex = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+    _codex_candidate = str(macos_codex) if macos_codex.exists() else "codex"
 CODEX_BIN = Path(_codex_candidate)
 OSASCRIPT_BIN = Path("/usr/bin/osascript")
 CODEX_IPC_SOCKET = Path.home() / ".codex" / "ipc" / "ipc.sock"
@@ -147,8 +149,22 @@ class RouterState:
     prearmed_turn_id: str = ""
     prearm_verification: str = "none"
     note: str = (
-        "실행 중인 턴은 보존하고, 활성 목표의 다음 턴을 선택 모델로 자동 재개합니다."
+        "Active turns are preserved; the selected route is applied at a safe turn boundary."
     )
+
+
+@dataclass
+class UsageSnapshot:
+    available: bool = False
+    limit_id: str = "codex"
+    used_percent: float = 0.0
+    remaining_percent: float = 0.0
+    window_duration_mins: int = 0
+    resets_at: int = 0
+    plan_type: str = ""
+    reset_credits: int = 0
+    updated_at: str = ""
+    error: str = ""
 
 
 def utc_now() -> str:
@@ -270,6 +286,16 @@ def prearm_next_turn(
     effort: str,
     timeout: float = 3.0,
 ) -> bool:
+    try:
+        _app_server_request(
+            "thread/settings/update",
+            {"threadId": thread_id, "model": model, "effort": effort},
+            timeout=timeout,
+        )
+        return True
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        if os.name == "nt":
+            raise
     response = codex_ipc_request(
         "thread-follower-update-thread-settings",
         {
@@ -278,18 +304,17 @@ def prearm_next_turn(
         },
         timeout=timeout,
     )
-    result = response.get("result") or {}
-    return bool(result.get("ok", True))
+    return bool((response.get("result") or {}).get("ok", True))
 
 
 def effort_label(effort: str) -> str:
     return {
-        "low": "낮음",
-        "medium": "보통",
-        "high": "높음",
-        "xhigh": "매우 높음",
-        "max": "최대",
-        "ultra": "최고",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Extra high",
+        "max": "Maximum",
+        "ultra": "Ultra",
     }.get(effort, effort)
 
 
@@ -298,33 +323,41 @@ def send_recommendation_notification(
     effort: str,
     reason: str,
 ) -> bool:
-    """Show a best-effort macOS notification without interpolating user text."""
-    if not model or not OSASCRIPT_BIN.exists():
+    """Show a best-effort native notification without interpolating user text."""
+    if not model:
         return False
-    message = f"{model} · 사고 강도 {effort_label(effort)}을 사용하세요."
+    message = f"Use {model} with {effort_label(effort)} reasoning."
     if reason:
         message = f"{reason}\n{message}"
-    script = (
-        "on run argv\n"
-        "display notification (item 1 of argv) with title (item 2 of argv) "
-        "subtitle (item 3 of argv)\n"
-        "end run"
-    )
     try:
-        subprocess.Popen(
-            [
-                str(OSASCRIPT_BIN),
-                "-e",
-                script,
-                message,
-                "코덱스 모델 추천",
-                "자동 변경을 적용하지 못했습니다",
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        if OSASCRIPT_BIN.exists():
+            script = (
+                "on run argv\n"
+                "display notification (item 1 of argv) with title (item 2 of argv) "
+                "subtitle (item 3 of argv)\n"
+                "end run"
+            )
+            command = [
+                str(OSASCRIPT_BIN), "-e", script, message,
+                "Codex model recommendation", "Automatic routing needs attention",
+            ]
+        else:
+            powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+            if not powershell:
+                return False
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "$n=New-Object System.Windows.Forms.NotifyIcon;"
+                "$n.Icon=[System.Drawing.SystemIcons]::Information;"
+                "$n.BalloonTipTitle=$args[0];$n.BalloonTipText=$args[1];"
+                "$n.Visible=$true;$n.ShowBalloonTip(5000);Start-Sleep -Seconds 6;$n.Dispose()"
+            )
+            command = [
+                powershell, "-NoProfile", "-WindowStyle", "Hidden", "-Command", script,
+                "Codex model recommendation", message,
+            ]
+        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
         return True
     except OSError as exc:
         append_log(f"notification failed: {exc}")
@@ -473,7 +506,31 @@ def run_prompt_submit_hook() -> int:
 
     config = load_config()
     prompt = normalize_user_prompt(str(hook_input.get("prompt") or "")).strip()
-    if not prompt or prompt_has_explicit_model_choice(prompt):
+    if not prompt:
+        return 0
+    guard = usage_guard_config(config)
+    if guard.get("enabled", False):
+        max_age = float(guard.get("max_cache_age_seconds", 300))
+        usage = cached_weekly_usage(max_age)
+        if not usage.available:
+            usage = query_weekly_usage(
+                timeout=float(guard.get("query_timeout_seconds", 3))
+            )
+        if usage_guard_is_paused(config, usage):
+            threshold = float(guard.get("pause_at_remaining_percent", 10))
+            append_log(
+                f"usage guard blocked prompt remaining={usage.remaining_percent:.1f}% "
+                f"threshold={threshold:.1f}%"
+            )
+            print(json.dumps({
+                "decision": "block",
+                "reason": (
+                    f"Weekly usage guard is paused at {usage.remaining_percent:.0f}% remaining "
+                    f"(threshold: {threshold:.0f}%). Disable the guard or wait for reset."
+                ),
+            }))
+            return 0
+    if prompt_has_explicit_model_choice(prompt):
         return 0
     decision = classify_task(prompt, config, source="prompt_submit")
     turn_id = str(hook_input.get("turn_id") or "")
@@ -497,7 +554,7 @@ def run_prompt_submit_hook() -> int:
         send_recommendation_notification(
             decision.model,
             decision.effort,
-            "요청을 제출 전에 분석했습니다.",
+            "This request was analyzed before submission.",
         )
     if not config.get("prompt_submit_reroute", True):
         return 0
@@ -525,7 +582,7 @@ def run_prompt_submit_hook() -> int:
     )
     if request_path is None:
         append_log(f"prompt reroute deduplicated thread={thread_id} turn={turn_id or '-'}")
-        print(json.dumps({"decision": "block", "reason": "자동 모델 전환 요청을 처리 중입니다."}))
+        print(json.dumps({"decision": "block", "reason": "Automatic rerouting is in progress."}))
         return 0
     try:
         subprocess.Popen(
@@ -549,8 +606,8 @@ def run_prompt_submit_hook() -> int:
             {
                 "decision": "block",
                 "reason": (
-                    f"자동 라우터가 {decision.model}/{decision.effort}로 바꿔 "
-                    "같은 요청을 바로 다시 시작합니다."
+                    f"The router selected {decision.model}/{decision.effort} and is "
+                    "resubmitting the same request."
                 ),
             },
             ensure_ascii=False,
@@ -725,43 +782,43 @@ def classify_task(
 
     if matches_any(SIMPLE_PATTERNS, normalized):
         score -= 1
-        reasons.append("단순 조회·설명 신호")
+        reasons.append("simple lookup or explanation signal")
     if matches_any(NORMAL_PATTERNS, normalized):
         score += 2
-        reasons.append("구현·수정 작업 신호")
+        reasons.append("implementation or editing signal")
     if matches_any(COMPLEX_PATTERNS, normalized):
         score += 4
-        reasons.append("복합 도구·자동화 작업 신호")
+        reasons.append("complex tooling or automation signal")
     if matches_any(CRITICAL_PATTERNS, normalized):
         score += 8
-        reasons.append("고위험·고정확도 작업 신호")
+        reasons.append("high-risk or high-accuracy signal")
 
     length = len(normalized)
     if length >= 1200:
         score += 2
-        reasons.append("긴 작업 설명")
+        reasons.append("long task description")
     elif length >= 500:
         score += 1
-        reasons.append("중간 이상 작업 설명")
+        reasons.append("medium-length task description")
 
     thresholds = config["thresholds"]
     if telemetry.failures_this_turn >= thresholds["failure_escalation_count"]:
         score += 3
-        reasons.append(f"현재 턴 실패 {telemetry.failures_this_turn}회")
+        reasons.append(f"{telemetry.failures_this_turn} failures in the current turn")
     if telemetry.tool_output_bytes_this_turn >= thresholds["large_tool_output_bytes"]:
         score += 1
-        reasons.append("도구 출력이 큼")
+        reasons.append("large tool output")
     recommend_compact = telemetry.context_ratio >= thresholds["context_warn_ratio"]
     if recommend_compact:
         score += 1
-        reasons.append(f"문맥 사용률 {telemetry.context_ratio:.0%}")
+        reasons.append(f"context usage {telemetry.context_ratio:.0%}")
 
     if not reasons:
-        reasons.append("일반 작업 기본값")
+        reasons.append("default general-work route")
 
     routes = list(config.get("routes") or [])
     if not routes:
-        raise ValueError("router_config.json에 routes가 없습니다")
+        raise ValueError("router_config.json has no routes")
     parallel_signal = matches_any(PARALLEL_PATTERNS, normalized)
     selected: Optional[Dict[str, Any]] = None
     for route in routes:
@@ -781,9 +838,9 @@ def classify_task(
     supported = list((config.get("model_capabilities") or {}).get(model_name) or [])
     if supported and effort not in supported:
         effort = supported[-1]
-        reasons.append(f"설치 모델 지원 범위에 맞춰 사고 강도를 {effort}로 조정")
+        reasons.append(f"reasoning effort adjusted to installed model support: {effort}")
     if parallel_signal and effort == "ultra":
-        reasons.append("명시적 병렬·전수 작업 신호")
+        reasons.append("explicit parallel or exhaustive-work signal")
     should_interrupt = bool(
         config.get("auto_interrupt", False)
         and telemetry.failures_this_turn >= thresholds["failure_escalation_count"] + 1
@@ -857,11 +914,11 @@ class RolloutObserver:
                 self.state.prearm_verification = "applied" if applied else "missed"
                 self.state.auto_apply_status = "prearm_applied" if applied else "prearm_missed"
                 self.state.note = (
-                    f"새 턴 실제 적용 확인: {next_model}/{next_effort}"
+                    f"Verified route on the new turn: {next_model}/{next_effort}"
                     if applied
                     else (
-                        f"사전 예약 불일치: 예약 {self.state.prearmed_model}/"
-                        f"{self.state.prearmed_effort}, 실제 {next_model}/{next_effort}"
+                        f"Pre-arm mismatch: expected {self.state.prearmed_model}/"
+                        f"{self.state.prearmed_effort}, actual {next_model}/{next_effort}"
                     )
                 )
                 append_log(
@@ -986,7 +1043,12 @@ class AutoRun:
     started_at: float
 
 
-def query_thread_goal(thread_id: str, timeout: float = 5.0) -> Dict[str, Any]:
+def _app_server_request(
+    method: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: float = 5.0,
+) -> Dict[str, Any]:
+    """Call a local Codex app-server method. This does not invoke a model."""
     process = subprocess.Popen(
         [str(CODEX_BIN), "app-server", "--listen", "stdio://"],
         stdin=subprocess.PIPE,
@@ -1011,11 +1073,7 @@ def query_thread_goal(thread_id: str, timeout: float = 5.0) -> Dict[str, Any]:
                 },
             },
             {"method": "initialized", "params": {}},
-            {
-                "method": "thread/goal/get",
-                "id": 1,
-                "params": {"threadId": thread_id},
-            },
+            {"method": method, "id": 1, **({"params": params} if params is not None else {})},
         ]
         for message in messages:
             process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
@@ -1036,8 +1094,10 @@ def query_thread_goal(thread_id: str, timeout: float = 5.0) -> Dict[str, Any]:
             except json.JSONDecodeError:
                 continue
             if response.get("id") == 1:
-                return (response.get("result") or {}).get("goal") or {}
-        return {}
+                if response.get("error"):
+                    raise RuntimeError(str(response["error"]))
+                return response.get("result") or {}
+        raise TimeoutError(f"Codex app-server request timed out: {method}")
     finally:
         if process.poll() is None:
             process.terminate()
@@ -1049,6 +1109,89 @@ def query_thread_goal(thread_id: str, timeout: float = 5.0) -> Dict[str, Any]:
             process.stdin.close()
         if process.stdout:
             process.stdout.close()
+
+
+def query_thread_goal(thread_id: str, timeout: float = 5.0) -> Dict[str, Any]:
+    try:
+        return (_app_server_request(
+            "thread/goal/get", {"threadId": thread_id}, timeout=timeout
+        ).get("goal") or {})
+    except (OSError, RuntimeError, TimeoutError, subprocess.SubprocessError):
+        return {}
+
+
+def parse_weekly_usage(result: Dict[str, Any]) -> UsageSnapshot:
+    """Normalize the Codex quota bucket with the longest rolling window."""
+    buckets = result.get("rateLimitsByLimitId") or {}
+    snapshot = buckets.get("codex") or result.get("rateLimits") or {}
+    windows = [
+        value for value in (snapshot.get("primary"), snapshot.get("secondary"))
+        if isinstance(value, dict)
+    ]
+    if not windows:
+        return UsageSnapshot(updated_at=utc_now(), error="No Codex quota window returned")
+    window = max(windows, key=lambda value: int(value.get("windowDurationMins") or 0))
+    used = min(max(float(window.get("usedPercent") or 0), 0.0), 100.0)
+    reset_summary = result.get("rateLimitResetCredits") or {}
+    return UsageSnapshot(
+        available=True,
+        limit_id=str(snapshot.get("limitId") or "codex"),
+        used_percent=used,
+        remaining_percent=100.0 - used,
+        window_duration_mins=int(window.get("windowDurationMins") or 0),
+        resets_at=int(window.get("resetsAt") or 0),
+        plan_type=str(snapshot.get("planType") or ""),
+        reset_credits=int(reset_summary.get("availableCount") or 0),
+        updated_at=utc_now(),
+    )
+
+
+def query_weekly_usage(timeout: float = 5.0) -> UsageSnapshot:
+    try:
+        snapshot = parse_weekly_usage(
+            _app_server_request("account/rateLimits/read", timeout=timeout)
+        )
+    except (OSError, RuntimeError, TimeoutError, ValueError, subprocess.SubprocessError) as exc:
+        snapshot = UsageSnapshot(updated_at=utc_now(), error=str(exc))
+    if snapshot.available:
+        atomic_write_json(USAGE_PATH, asdict(snapshot))
+    return snapshot
+
+
+def cached_weekly_usage(max_age_seconds: float = 300.0) -> UsageSnapshot:
+    try:
+        value = json.loads(USAGE_PATH.read_text(encoding="utf-8"))
+        modified_age = max(0.0, time.time() - USAGE_PATH.stat().st_mtime)
+        if modified_age > max_age_seconds:
+            return UsageSnapshot(error="Cached usage is stale")
+        return UsageSnapshot(**{key: value[key] for key in UsageSnapshot.__dataclass_fields__ if key in value})
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return UsageSnapshot(error="No cached usage")
+
+
+def usage_guard_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    value = config.get("usage_guard") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def usage_guard_is_paused(config: Dict[str, Any], usage: UsageSnapshot) -> bool:
+    guard = usage_guard_config(config)
+    return bool(
+        guard.get("enabled", False)
+        and usage.available
+        and usage.remaining_percent <= float(guard.get("pause_at_remaining_percent", 10))
+    )
+
+
+def usage_guard_state(config: Dict[str, Any], usage: UsageSnapshot) -> Dict[str, Any]:
+    guard = usage_guard_config(config)
+    return {
+        "enabled": bool(guard.get("enabled", False)),
+        "pause_at_remaining_percent": float(guard.get("pause_at_remaining_percent", 10)),
+        "paused": usage_guard_is_paused(config, usage),
+        "mode": "safe_turn_boundary",
+        "note": "Active turns finish safely; new prompts and automatic follow-ups are paused.",
+    }
 
 
 def auto_apply_key(state: RouterState) -> str:
@@ -1085,6 +1228,46 @@ class MultiRolloutObserver:
         self.last_notification: Dict[str, float] = {}
         self.prearmed_keys: set[str] = set()
         self.last_prearm_attempt: Dict[str, float] = {}
+        self.usage = UsageSnapshot(updated_at=utc_now())
+        self.last_usage_refresh = 0.0
+        self.last_config_check = 0.0
+        try:
+            self.config_mtime = CONFIG_PATH.stat().st_mtime
+        except OSError:
+            self.config_mtime = 0.0
+
+    def _reload_config(self) -> None:
+        now = time.monotonic()
+        if now - self.last_config_check < 2:
+            return
+        self.last_config_check = now
+        try:
+            modified = CONFIG_PATH.stat().st_mtime
+            if modified == self.config_mtime:
+                return
+            updated = load_config()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            append_log(f"config reload failed: {exc}")
+            return
+        self.config.clear()
+        self.config.update(updated)
+        self.config_mtime = modified
+        append_log("configuration reloaded")
+
+    def _refresh_usage(self, force: bool = False) -> None:
+        interval = float(self.config.get("usage_poll_interval_seconds", 300))
+        now = time.monotonic()
+        if not force and now - self.last_usage_refresh < interval:
+            return
+        self.last_usage_refresh = now
+        updated = query_weekly_usage(
+            timeout=float(usage_guard_config(self.config).get("query_timeout_seconds", 3))
+        )
+        if updated.available or not self.usage.available:
+            self.usage = updated
+
+    def _usage_paused(self) -> bool:
+        return usage_guard_is_paused(self.config, self.usage)
 
     def _notify_manual_action(
         self,
@@ -1154,6 +1337,8 @@ class MultiRolloutObserver:
         return WatchedRollout(path, observer, offset, activity_at)
 
     def poll(self) -> None:
+        self._reload_config()
+        self._refresh_usage()
         self.refresh_discovery()
         self._reap_auto_runs()
         for thread_id, watched in list(self.tasks.items()):
@@ -1184,6 +1369,11 @@ class MultiRolloutObserver:
         self._schedule_auto_apply()
 
     def _schedule_prearm(self) -> None:
+        if self._usage_paused():
+            for watched in self.tasks.values():
+                if not watched.observer.state.turn_active:
+                    watched.observer.state.auto_apply_status = "usage_paused"
+            return
         if not self.config.get("prearm_next_turn", True):
             return
         timeout = float(self.config.get("desktop_ipc_timeout_seconds", 3))
@@ -1221,12 +1411,12 @@ class MultiRolloutObserver:
                     raise RuntimeError("Codex Desktop rejected next-turn settings")
             except (OSError, RuntimeError, ValueError, ConnectionError) as exc:
                 state.auto_apply_status = "prearm_failed"
-                state.note = f"다음 턴 모델 예약 실패: {exc}"
+                state.note = f"Could not pre-arm the next-turn route: {exc}"
                 append_log(f"prearm failed thread={thread_id}: {exc}")
                 self._notify_manual_action(
                     thread_id,
                     state,
-                    "다음 턴 모델을 미리 예약하지 못했습니다.",
+                    "The next-turn route could not be pre-armed.",
                     "prearm_failed",
                 )
                 continue
@@ -1237,8 +1427,8 @@ class MultiRolloutObserver:
             state.prearm_verification = "pending"
             state.auto_apply_status = "next_turn_prearmed"
             state.note = (
-                f"다음 턴 예약 완료: {decision.model}/{decision.effort} · "
-                f"현재 턴은 중단하지 않습니다."
+                f"Next turn pre-armed: {decision.model}/{decision.effort}. "
+                f"The active turn was not interrupted."
             )
             append_log(
                 f"next-turn prearmed thread={thread_id} "
@@ -1262,9 +1452,9 @@ class MultiRolloutObserver:
                 state.auto_apply_status = "completed" if return_code == 0 else "failed"
                 state.auto_apply_pid = 0
                 state.note = (
-                    f"자동 전환 실행 완료: {run.model}/{run.effort}"
+                    f"Automatic reroute completed: {run.model}/{run.effort}"
                     if return_code == 0
-                    else f"자동 전환 실행 실패(exit={return_code})"
+                    else f"Automatic reroute failed (exit={return_code})"
                 )
             if return_code != 0:
                 self.applied_keys.discard(run.key)
@@ -1273,12 +1463,22 @@ class MultiRolloutObserver:
                     self._notify_manual_action(
                         thread_id,
                         watched.observer.state,
-                        "자동 모델 변경이 실패했습니다.",
+                        "Automatic model routing failed.",
                         "failed",
                     )
             append_log(f"auto-apply exited thread={thread_id} code={return_code}")
 
     def _schedule_auto_apply(self) -> None:
+        if self._usage_paused():
+            for watched in self.tasks.values():
+                state = watched.observer.state
+                if not state.turn_active:
+                    state.auto_apply_status = "usage_paused"
+                    state.note = (
+                        f"Weekly usage guard paused automatic follow-ups at "
+                        f"{self.usage.remaining_percent:.0f}% remaining."
+                    )
+            return
         if not self.config.get("auto_apply", False):
             for thread_id, watched in self.tasks.items():
                 state = watched.observer.state
@@ -1286,7 +1486,7 @@ class MultiRolloutObserver:
                     self._notify_manual_action(
                         thread_id,
                         state,
-                        "자동 변경이 꺼져 있습니다.",
+                        "Automatic model routing is disabled.",
                         "disabled",
                     )
             return
@@ -1339,12 +1539,12 @@ class MultiRolloutObserver:
             )
             if self.config.get("require_active_goal", False) and goal_status != "active":
                 state.auto_apply_status = f"goal_{goal_status}"
-                state.note = "활성 목표가 아니므로 자동 재개하지 않습니다."
+                state.note = "Automatic continuation skipped because the goal is not active."
                 self.last_auto_apply[thread_id] = now
                 reason = (
-                    "목표가 중지되어 자동 변경할 수 없습니다."
+                    "The goal is blocked, so automatic routing cannot continue it."
                     if goal_status == "blocked"
-                    else "활성 목표가 없어 자동 변경할 수 없습니다."
+                    else "There is no active goal to continue automatically."
                 )
                 self._notify_manual_action(
                     thread_id,
@@ -1356,8 +1556,8 @@ class MultiRolloutObserver:
             if goal_status != "active" and not has_announced_follow_up:
                 state.auto_apply_status = "non_goal_complete"
                 state.note = (
-                    "일반 요청이 완료되어 자동 재개하지 않습니다. "
-                    "새 요청은 제출 전 훅에서 다시 분류합니다."
+                    "The non-goal request is complete, so it will not be resumed. "
+                    "The next request will be classified by the submit hook."
                 )
                 self.last_auto_apply[thread_id] = now
                 continue
@@ -1378,7 +1578,7 @@ class MultiRolloutObserver:
         prompt = state.planned_next_step or str(
             self.config.get(
                 "continuation_prompt",
-                "활성 목표를 계속 진행하세요. 직전에 선언한 다음 작업을 우선 수행하세요.",
+                "Continue the active goal and prioritize the previously announced next step.",
             )
         )
         command = [
@@ -1413,11 +1613,11 @@ class MultiRolloutObserver:
             log_handle.write(f"launch failed: {exc}\n")
             log_handle.close()
             state.auto_apply_status = "failed"
-            state.note = f"자동 전환 실행 실패: {exc}"
+            state.note = f"Could not launch automatic rerouting: {exc}"
             self._notify_manual_action(
                 thread_id,
                 state,
-                "자동 모델 변경을 시작하지 못했습니다.",
+                "Automatic model routing could not be started.",
                 "launch_failed",
             )
             append_log(f"auto-apply launch failed thread={thread_id}: {exc}")
@@ -1434,7 +1634,7 @@ class MultiRolloutObserver:
         state.auto_apply_model = decision.model
         state.auto_apply_effort = decision.effort
         state.auto_apply_pid = process.pid
-        state.note = f"자동 모델 전환 시작: {decision.model}/{decision.effort}"
+        state.note = f"Automatic reroute started: {decision.model}/{decision.effort}"
         append_log(
             f"auto-apply started thread={thread_id} pid={process.pid} "
             f"model={decision.model} effort={decision.effort}"
@@ -1450,7 +1650,7 @@ class MultiRolloutObserver:
             watched.observer.state.activity_at = watched.activity_at
             task_states.append(asdict(watched.observer.state))
         return {
-            "version": 2,
+            "version": 3,
             "multi": True,
             "running": running,
             "watcher_pid": os.getpid(),
@@ -1458,6 +1658,8 @@ class MultiRolloutObserver:
             "updated_at": utc_now(),
             "mode": "multi_auto_apply" if self.config.get("auto_apply") else "multi_observe",
             "strategy": self.config.get("strategy", "turn_boundary"),
+            "usage": asdict(self.usage),
+            "usage_guard": usage_guard_state(self.config, self.usage),
             "tasks": task_states,
         }
 
@@ -1536,6 +1738,7 @@ def watch_all_worker(config: Dict[str, Any]) -> int:
     signal.signal(signal.SIGINT, stop_handler)
     append_log(f"multi-watch started pid={os.getpid()}")
     try:
+        observer._refresh_usage(force=True)
         observer.refresh_discovery(force=True)
         atomic_write_json(STATE_PATH, observer.snapshot())
         while not stopping:
@@ -1563,7 +1766,7 @@ def start_daemon(session_path: Optional[Path], watch_all: bool = False) -> int:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             saved_pid = 0
         if process_is_running(saved_pid):
-            print(f"이미 실행 중입니다. pid={saved_pid}")
+            print(f"Watcher is already running. pid={saved_pid}")
             return 0
     if PID_PATH.exists():
         try:
@@ -1571,7 +1774,7 @@ def start_daemon(session_path: Optional[Path], watch_all: bool = False) -> int:
         except ValueError:
             old_pid = 0
         if process_is_running(old_pid):
-            print(f"이미 실행 중입니다. pid={old_pid}")
+            print(f"Watcher is already running. pid={old_pid}")
             return 0
 
     command = [
@@ -1600,16 +1803,16 @@ def start_daemon(session_path: Optional[Path], watch_all: bool = False) -> int:
             try:
                 state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
                 if state.get("watcher_pid") == process.pid and state.get("running"):
-                    print(f"실시간 감시를 시작했습니다. pid={process.pid}")
+                    print(f"Started real-time monitoring. pid={process.pid}")
                     print("session=all-active" if watch_all else f"session={session_path}")
                     return 0
             except (OSError, json.JSONDecodeError):
                 pass
         if process.poll() is not None:
-            print(f"감시 프로세스 시작 실패: exit={process.returncode}", file=sys.stderr)
+            print(f"Watcher failed to start: exit={process.returncode}", file=sys.stderr)
             return 1
         time.sleep(0.1)
-    print("감시 프로세스가 시작됐지만 상태 확인 시간이 초과됐습니다.", file=sys.stderr)
+    print("The watcher started but state verification timed out.", file=sys.stderr)
     return 1
 
 
@@ -1627,23 +1830,23 @@ def stop_daemon() -> int:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pid = 0
     if pid <= 0:
-        print("실행 중인 감시 프로세스가 없습니다.")
+        print("No watcher process is running.")
         return 0
     if not process_is_running(pid):
         PID_PATH.unlink(missing_ok=True)
-        print("종료된 감시 프로세스의 PID 파일을 정리했습니다.")
+        print("Removed the stale watcher PID file.")
         return 0
     os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and process_is_running(pid):
         time.sleep(0.1)
-    print(f"감시 중지 요청을 보냈습니다. pid={pid}")
+    print(f"Sent the watcher stop request. pid={pid}")
     return 0
 
 
 def read_state() -> Dict[str, Any]:
     if not STATE_PATH.exists():
-        raise FileNotFoundError("상태 파일이 없습니다. 먼저 watch --daemon을 실행하세요.")
+        raise FileNotFoundError("No state file exists. Run watch --daemon first.")
     return json.loads(STATE_PATH.read_text(encoding="utf-8"))
 
 
@@ -1658,8 +1861,11 @@ def print_status(as_json: bool = False) -> int:
         return 0
     if state.get("multi"):
         tasks = state.get("tasks") or []
-        print(f"감시 상태: {'실행 중' if state.get('running') else '중지'}")
-        print(f"활성 사용자 작업: {len(tasks)}개")
+        print(f"Watcher: {'running' if state.get('running') else 'stopped'}")
+        print(f"Active user tasks: {len(tasks)}")
+        usage = state.get("usage") or {}
+        if usage.get("available"):
+            print(f"Weekly usage remaining: {float(usage.get('remaining_percent', 0)):.0f}%")
         for index, task in enumerate(tasks, start=1):
             decision = task.get("decision") or {}
             telemetry = task.get("telemetry") or {}
@@ -1669,27 +1875,27 @@ def print_status(as_json: bool = False) -> int:
                 f"    {task.get('current_model') or '-'} / {task.get('current_effort') or '-'}"
                 f" → {decision.get('model') or '-'} / {decision.get('effort') or '-'}"
             )
-            print(f"    문맥 {float(telemetry.get('context_ratio', 0)):.1%} · 후속 작업: {task.get('planned_next_step') or '-'}")
-        print("보조·승인 검토 세션은 상위 사용자 작업에 합쳐서 계산합니다.")
+            print(f"    context {float(telemetry.get('context_ratio', 0)):.1%} · follow-up: {task.get('planned_next_step') or '-'}")
+        print("Subagent and guardian sessions are counted under their root user task.")
         return 0
     decision = state.get("decision") or {}
     telemetry = state.get("telemetry") or {}
-    print(f"감시 상태: {'실행 중' if state.get('running') else '중지'}")
-    print(f"작업 ID: {state.get('thread_id') or '-'}")
-    print(f"현재 모델: {state.get('current_model') or '-'} / {state.get('current_effort') or '-'}")
+    print(f"Watcher: {'running' if state.get('running') else 'stopped'}")
+    print(f"Task ID: {state.get('thread_id') or '-'}")
+    print(f"Current model: {state.get('current_model') or '-'} / {state.get('current_effort') or '-'}")
     print(
-        f"추천 모델: {decision.get('model') or '-'} / {decision.get('effort') or '-'} "
+        f"Recommended model: {decision.get('model') or '-'} / {decision.get('effort') or '-'} "
         f"(tier={decision.get('tier') or '-'})"
     )
-    print(f"판단 기준: {decision.get('source') or '-'}")
-    print(f"다음 작업: {state.get('planned_next_step') or '(아직 선언되지 않음)'}")
-    print(f"실패 횟수: {telemetry.get('failures_this_turn', 0)}")
-    print(f"문맥 사용률: {float(telemetry.get('context_ratio', 0)):.1%}")
+    print(f"Decision source: {decision.get('source') or '-'}")
+    print(f"Next task: {state.get('planned_next_step') or '(not announced yet)'}")
+    print(f"Failures: {telemetry.get('failures_this_turn', 0)}")
+    print(f"Context usage: {float(telemetry.get('context_ratio', 0)):.1%}")
     if decision.get("reasons"):
-        print("이유: " + ", ".join(decision["reasons"]))
+        print("Reasons: " + ", ".join(decision["reasons"]))
     if decision.get("recommend_compact"):
-        print("권고: 다음 모델 변경 전에 문맥 압축을 고려하세요.")
-    print("적용 모드: 관찰 전용 — 데스크톱 앱 세션을 외부에서 덮어쓰지 않습니다.")
+        print("Recommendation: consider compacting context before the next model change.")
+    print("Mode: observe only — active Desktop turns are never overwritten externally.")
     return 0
 
 
@@ -1733,14 +1939,14 @@ def submit_prompt(
         prompt,
     ]
     print(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
-    print("실행 예정: codex exec resume <thread> -m " + decision.model)
+    print("Planned command: codex exec resume <thread> -m " + decision.model)
     if not execute:
-        print("dry-run입니다. 실제 실행하려면 --execute를 추가하세요.")
+        print("Dry run. Add --execute to run it.")
         return 0
     if session_looks_active(session_path) and not force_active:
         print(
-            "현재 데스크톱 앱이 이 작업을 갱신 중인 것으로 보입니다. 세션 충돌 방지를 위해 "
-            "실행하지 않았습니다. 작업을 멈추거나 닫은 뒤 다시 실행하세요.",
+            "Codex Desktop appears to be updating this task. It was not resumed to avoid a "
+            "session conflict. Stop or close the task, then try again.",
             file=sys.stderr,
         )
         return 2
@@ -1751,11 +1957,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex goal-aware automatic model router")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    watch = subparsers.add_parser("watch", help="Codex rollout을 실시간 감시")
-    watch.add_argument("--thread-id", help="감시할 Codex 작업 ID")
-    watch.add_argument("--session", type=Path, help="감시할 rollout JSONL 경로")
-    watch.add_argument("--all", action="store_true", help="활성 사용자 작업을 모두 감시")
-    watch.add_argument("--daemon", action="store_true", help="백그라운드 실행")
+    watch = subparsers.add_parser("watch", help="Monitor Codex rollouts in real time")
+    watch.add_argument("--thread-id", help="Codex task ID to monitor")
+    watch.add_argument("--session", type=Path, help="Rollout JSONL path to monitor")
+    watch.add_argument("--all", action="store_true", help="Monitor all active user tasks")
+    watch.add_argument("--daemon", action="store_true", help="Run in the background")
 
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--session", type=Path)
@@ -1765,22 +1971,25 @@ def build_parser() -> argparse.ArgumentParser:
     routed = subparsers.add_parser("_resume-routed", help=argparse.SUPPRESS)
     routed.add_argument("--request", type=Path, required=True)
 
-    status = subparsers.add_parser("status", help="현재 추천 상태 표시")
+    status = subparsers.add_parser("status", help="Show current routing status")
     status.add_argument("--json", action="store_true")
 
-    subparsers.add_parser("stop", help="백그라운드 감시 중지")
+    usage = subparsers.add_parser("usage", help="Refresh and show weekly Codex usage")
+    usage.add_argument("--json", action="store_true")
 
-    decide = subparsers.add_parser("decide", help="문장만으로 모델 결정 테스트")
+    subparsers.add_parser("stop", help="Stop background monitoring")
+
+    decide = subparsers.add_parser("decide", help="Test a model decision from text")
     decide.add_argument("text")
 
-    submit = subparsers.add_parser("submit", help="선택한 모델로 기존 작업의 다음 턴 실행")
+    submit = subparsers.add_parser("submit", help="Resume a task with the selected model")
     submit.add_argument("--thread-id", required=True)
     submit.add_argument("--prompt", required=True)
     submit.add_argument("--execute", action="store_true")
     submit.add_argument(
         "--force-active",
         action="store_true",
-        help="활성 데스크톱 세션 충돌 경고를 무시(권장하지 않음)",
+        help="Ignore active Desktop session conflict warnings (not recommended)",
     )
     return parser
 
@@ -1808,6 +2017,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         return resume_routed_request(args.request)
     if args.command == "status":
         return print_status(args.json)
+    if args.command == "usage":
+        usage = query_weekly_usage()
+        if args.json:
+            print(json.dumps(asdict(usage), ensure_ascii=False, indent=2))
+        elif usage.available:
+            print(f"Weekly Codex usage remaining: {usage.remaining_percent:.0f}%")
+            if usage.resets_at:
+                reset = datetime.fromtimestamp(usage.resets_at).astimezone()
+                print(f"Resets: {reset.isoformat(timespec='minutes')}")
+        else:
+            print(f"Weekly usage unavailable: {usage.error}", file=sys.stderr)
+            return 1
+        return 0
     if args.command == "stop":
         return stop_daemon()
     if args.command == "decide":

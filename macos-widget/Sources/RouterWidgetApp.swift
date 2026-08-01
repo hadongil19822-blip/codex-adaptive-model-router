@@ -13,6 +13,7 @@ private let routerConfig = Bundle.main.url(
 ) ?? runtimeRoot.appendingPathComponent("router_config.json")
 private let stateFile = runtimeRoot.appendingPathComponent("runtime/state.json")
 private let pidFile = runtimeRoot.appendingPathComponent("runtime/watcher.pid")
+private let liveConfigFile = runtimeRoot.appendingPathComponent("router_config.json")
 private let pythonExecutable = URL(fileURLWithPath: "/usr/bin/python3")
 
 struct TelemetryState: Codable {
@@ -73,7 +74,30 @@ struct RouterEnvelope: Codable {
     var updatedAt: String?
     var mode: String?
     var strategy: String?
+    var usage: UsageState?
+    var usageGuard: UsageGuardState?
     var tasks: [RouterState]?
+}
+
+struct UsageState: Codable {
+    var available: Bool?
+    var limitId: String?
+    var usedPercent: Double?
+    var remainingPercent: Double?
+    var windowDurationMins: Int?
+    var resetsAt: Int?
+    var planType: String?
+    var resetCredits: Int?
+    var updatedAt: String?
+    var error: String?
+}
+
+struct UsageGuardState: Codable {
+    var enabled: Bool?
+    var pauseAtRemainingPercent: Double?
+    var paused: Bool?
+    var mode: String?
+    var note: String?
 }
 
 @MainActor
@@ -83,7 +107,12 @@ final class RouterViewModel: ObservableObject {
     @Published var controllerPid = 0
     @Published var isWatcherAlive = false
     @Published var isCommandRunning = false
-    @Published var message = "상태를 확인하고 있습니다…"
+    @Published var message = "Checking router status…"
+    @Published var usage: UsageState?
+    @Published var usageGuard: UsageGuardState?
+    @Published var guardEnabled = false
+    @Published var guardThreshold = 10.0
+    @Published var guardSettingsDirty = false
     @Published var lastRefresh = Date()
 
     private var timer: Timer?
@@ -109,6 +138,18 @@ final class RouterViewModel: ObservableObject {
                 state = tasks.first
                 controllerPid = envelope.watcherPid ?? 0
                 isWatcherAlive = processIsAlive(controllerPid)
+                usage = envelope.usage
+                usageGuard = envelope.usageGuard
+                if guardSettingsDirty {
+                    let savedEnabled = envelope.usageGuard?.enabled ?? false
+                    let savedThreshold = envelope.usageGuard?.pauseAtRemainingPercent ?? 10
+                    if savedEnabled == guardEnabled && abs(savedThreshold - guardThreshold) < 0.5 {
+                        guardSettingsDirty = false
+                    }
+                } else {
+                    guardEnabled = envelope.usageGuard?.enabled ?? guardEnabled
+                    guardThreshold = envelope.usageGuard?.pauseAtRemainingPercent ?? guardThreshold
+                }
             } else {
                 let decoded = try decoder.decode(RouterState.self, from: data)
                 state = decoded
@@ -118,7 +159,7 @@ final class RouterViewModel: ObservableObject {
             }
             lastRefresh = Date()
             if !isCommandRunning {
-                message = isWatcherAlive ? "자동 모델 변경이 작동 중입니다." : "자동 모델 변경이 중지되어 있습니다."
+                message = isWatcherAlive ? "Automatic model routing is active." : "Automatic model routing is stopped."
             }
         } catch {
             state = nil
@@ -126,28 +167,47 @@ final class RouterViewModel: ObservableObject {
             controllerPid = 0
             isWatcherAlive = false
             if !isCommandRunning {
-                message = "상태 파일을 읽을 수 없습니다: \(error.localizedDescription)"
+                message = "Could not read router state: \(error.localizedDescription)"
             }
         }
     }
 
     func startWatching() {
         let arguments = [routerScript.path, "watch", "--all", "--daemon"]
-        runPython(arguments: arguments, action: "자동 변경 시작")
+        runPython(arguments: arguments, action: "Start automatic routing")
     }
 
     func stopWatching() {
-        runPython(arguments: [routerScript.path, "stop"], action: "자동 변경 중지")
+        runPython(arguments: [routerScript.path, "stop"], action: "Stop automatic routing")
     }
 
     func openRouterFolder() {
         NSWorkspace.shared.open(runtimeRoot)
     }
 
+    func saveUsageGuard() {
+        do {
+            let data = try Data(contentsOf: liveConfigFile)
+            guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            var guardConfig = root["usage_guard"] as? [String: Any] ?? [:]
+            guardConfig["enabled"] = guardEnabled
+            guardConfig["pause_at_remaining_percent"] = Int(guardThreshold.rounded())
+            guardConfig["mode"] = "safe_turn_boundary"
+            root["usage_guard"] = guardConfig
+            let updated = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            try updated.write(to: liveConfigFile, options: .atomic)
+            message = "Usage guard settings saved. The watcher reloads them automatically."
+        } catch {
+            message = "Could not save usage guard settings: \(error.localizedDescription)"
+        }
+    }
+
     private func runPython(arguments: [String], action: String) {
         guard !isCommandRunning else { return }
         isCommandRunning = true
-        message = "\(action) 요청을 처리하고 있습니다…"
+        message = "\(action)…"
 
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
@@ -188,8 +248,8 @@ final class RouterViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.isCommandRunning = false
                 self.message = exitCode == 0
-                    ? (output.isEmpty ? "\(action) 완료" : output)
-                    : "\(action) 실패: \(output)"
+                    ? (output.isEmpty ? "\(action) complete" : output)
+                    : "\(action) failed: \(output)"
                 self.refresh()
             }
         }
@@ -214,7 +274,7 @@ struct StatusPill: View {
                 .fill(alive ? Color.green : Color.red)
                 .frame(width: 9, height: 9)
                 .shadow(color: (alive ? Color.green : Color.red).opacity(0.8), radius: 5)
-            Text(alive ? "자동 변경 작동 중" : "중지됨")
+            Text(alive ? "ROUTING ACTIVE" : "STOPPED")
                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .foregroundStyle(alive ? Color.green : Color.red)
         }
@@ -269,45 +329,46 @@ struct TaskCard: View {
         let value = task.plannedNextStep?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !value.isEmpty { return value }
         let preview = task.latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return preview.isEmpty ? "후속 작업을 기다리는 중입니다." : preview
+        return preview.isEmpty ? "Waiting for follow-up work." : preview
     }
 
     private var routingLabel: String {
         switch task.autoApplyStatus ?? "" {
-        case "switching", "running": return "자동 변경 중"
-        case "prearming": return "다음 턴 예약 중"
-        case "next_turn_prearmed": return "다음 턴 예약 완료"
-        case "prearm_applied": return "실제 적용 확인"
-        case "prearm_missed": return "예약 불일치"
-        case "waiting_next_step": return "다음 작업 분석 중"
-        case "non_goal_complete": return "일반 요청 완료"
-        case "prearm_failed": return "사전 예약 실패"
-        case "already_optimal": return "이미 최적 모델"
-        case "waiting_turn_boundary": return "작업 종료 후 변경"
-        case "goal_blocked": return "목표 중지됨"
-        case "goal_missing": return "활성 목표 없음"
-        case "failed": return "변경 실패"
-        case "cooldown": return "재시도 대기"
-        default: return "변경 준비됨"
+        case "switching", "running": return "SWITCHING"
+        case "prearming": return "PRE-ARMING"
+        case "next_turn_prearmed": return "NEXT TURN READY"
+        case "prearm_applied": return "ROUTE VERIFIED"
+        case "prearm_missed": return "ROUTE MISMATCH"
+        case "waiting_next_step": return "ANALYZING NEXT STEP"
+        case "non_goal_complete": return "REQUEST COMPLETE"
+        case "prearm_failed": return "PRE-ARM FAILED"
+        case "already_optimal": return "OPTIMAL ROUTE"
+        case "waiting_turn_boundary": return "WAITING FOR BOUNDARY"
+        case "goal_blocked": return "GOAL BLOCKED"
+        case "goal_missing": return "NO ACTIVE GOAL"
+        case "usage_paused": return "USAGE PAUSED"
+        case "failed": return "SWITCH FAILED"
+        case "cooldown": return "COOLDOWN"
+        default: return "ROUTE READY"
         }
     }
 
     private var tierLabel: String {
         let tier = task.decision?.tier ?? ""
-        if tier.hasPrefix("luna_") { return "절약형 · Luna" }
-        if tier.hasPrefix("terra_") { return "균형형 · Terra" }
-        if tier.hasPrefix("sol_") { return "고성능 · Sol" }
-        return "분석 중"
+        if tier.hasPrefix("luna_") { return "ECONOMY · LUNA" }
+        if tier.hasPrefix("terra_") { return "BALANCED · TERRA" }
+        if tier.hasPrefix("sol_") { return "POWER · SOL" }
+        return "ANALYZING"
     }
 
     private func effortLabel(_ effort: String?) -> String {
         switch effort ?? "" {
-        case "low": return "낮음"
-        case "medium": return "보통"
-        case "high": return "높음"
-        case "xhigh": return "매우 높음"
-        case "max": return "최대"
-        case "ultra": return "최고"
+        case "low": return "Low"
+        case "medium": return "Medium"
+        case "high": return "High"
+        case "xhigh": return "Extra high"
+        case "max": return "Maximum"
+        case "ultra": return "Ultra"
         default: return "—"
         }
     }
@@ -319,7 +380,7 @@ struct TaskCard: View {
         case "next_turn_prearmed": return .green
         case "prearm_applied": return .green
         case "already_optimal": return .green
-        case "goal_blocked", "goal_missing", "failed", "prearm_failed", "prearm_missed": return .red
+        case "goal_blocked", "goal_missing", "usage_paused", "failed", "prearm_failed", "prearm_missed": return .red
         default: return .cyan
         }
     }
@@ -342,20 +403,20 @@ struct TaskCard: View {
                 Text(tierLabel)
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(Color.purple)
-                Text("문맥 \(Int(contextRatio * 100))%")
+                Text("CONTEXT \(Int(contextRatio * 100))%")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(contextRatio >= 0.8 ? Color.orange : Color.cyan)
             }
 
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("현재 사용 중")
+                    Text("CURRENT ROUTE")
                         .font(.system(size: 8, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color.white.opacity(0.38))
                     Text(task.currentModel ?? "—")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white)
-                    Text("사고 강도: \(effortLabel(task.currentEffort))")
+                    Text("Reasoning: \(effortLabel(task.currentEffort))")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.cyan)
                 }
@@ -366,13 +427,13 @@ struct TaskCard: View {
                     .foregroundStyle(Color.white.opacity(0.25))
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("다음 턴에 자동 적용")
+                    Text("NEXT TURN")
                         .font(.system(size: 8, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color.white.opacity(0.38))
                     Text(task.decision?.model ?? "—")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white)
-                    Text("사고 강도: \(effortLabel(task.decision?.effort))")
+                    Text("Reasoning: \(effortLabel(task.decision?.effort))")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.purple)
                 }
@@ -403,6 +464,94 @@ struct TaskCard: View {
     }
 }
 
+struct UsageCard: View {
+    @EnvironmentObject var model: RouterViewModel
+
+    private var remaining: Double {
+        min(max(model.usage?.remainingPercent ?? 0, 0), 100)
+    }
+
+    private var resetText: String {
+        guard let timestamp = model.usage?.resetsAt, timestamp > 0 else { return "Reset time unavailable" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "Resets \(formatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp))))"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("WEEKLY CODEX USAGE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.48))
+                    Text(model.usage?.available == true ? "\(Int(remaining.rounded()))% remaining" : "Usage unavailable")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .foregroundStyle(remaining <= model.guardThreshold && model.guardEnabled ? Color.orange : Color.white)
+                }
+                Spacer()
+                if model.usageGuard?.paused == true {
+                    Text("PAUSED")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
+                }
+            }
+
+            ProgressView(value: remaining, total: 100)
+                .tint(remaining <= 20 ? .orange : .green)
+
+            HStack {
+                Text(resetText)
+                Spacer()
+                if (model.usage?.resetCredits ?? 0) > 0 {
+                    Text("\(model.usage?.resetCredits ?? 0) reset credit")
+                }
+            }
+            .font(.system(size: 9, design: .monospaced))
+            .foregroundStyle(Color.white.opacity(0.42))
+
+            Divider().overlay(Color.white.opacity(0.08))
+
+            Toggle("Pause new work when weekly usage is low", isOn: Binding(
+                get: { model.guardEnabled },
+                set: { model.guardEnabled = $0; model.guardSettingsDirty = true }
+            ))
+                .toggleStyle(.switch)
+                .font(.system(size: 11, weight: .medium))
+
+            HStack {
+                Text("Pause at")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                Slider(value: Binding(
+                    get: { model.guardThreshold },
+                    set: { model.guardThreshold = $0; model.guardSettingsDirty = true }
+                ), in: 1...50, step: 1)
+                    .disabled(!model.guardEnabled)
+                Text("\(Int(model.guardThreshold))%")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .frame(width: 34, alignment: .trailing)
+                Button("Save") { model.saveUsageGuard() }
+                    .buttonStyle(.bordered)
+            }
+
+            Text("Safe mode: active turns finish; new prompts and automatic follow-ups pause at the threshold.")
+                .font(.system(size: 9))
+                .foregroundStyle(Color.white.opacity(0.38))
+        }
+        .padding(13)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.green.opacity(0.16), lineWidth: 1)
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: RouterViewModel
 
@@ -410,26 +559,29 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("코덱스 자동 모델 전환기")
+                    Text("Codex Adaptive Model Router")
                         .font(.system(size: 17, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("모든 요청을 제출 전에 분석하고 알맞은 모델로 자동 변경")
+                    Text("Local, zero-token routing for every task")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.cyan.opacity(0.72))
                 }
                 Spacer()
-                Text("작업 \(model.tasks.count)개")
+                Text("\(model.tasks.count) TASKS")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(Color.white.opacity(0.4))
                 StatusPill(alive: model.isWatcherAlive)
             }
+
+            UsageCard()
+                .environmentObject(model)
 
             VStack(spacing: 10) {
                 ForEach(Array(model.tasks.prefix(4).enumerated()), id: \.offset) { _, task in
                     TaskCard(task: task)
                 }
                 if model.tasks.isEmpty {
-                    Text("활성 사용자 작업을 찾고 있습니다…")
+                    Text("Looking for active user tasks…")
                         .font(.system(size: 11))
                         .foregroundStyle(Color.white.opacity(0.45))
                         .frame(maxWidth: .infinity)
@@ -442,7 +594,7 @@ struct ContentView: View {
                     model.isWatcherAlive ? model.stopWatching() : model.startWatching()
                 } label: {
                     Label(
-                        model.isWatcherAlive ? "자동 변경 중지" : "자동 변경 시작",
+                        model.isWatcherAlive ? "Stop routing" : "Start routing",
                         systemImage: model.isWatcherAlive ? "stop.fill" : "play.fill"
                     )
                     .frame(maxWidth: .infinity)
@@ -457,7 +609,7 @@ struct ContentView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
-                .help("상태 새로고침")
+                .help("Refresh status")
 
                 Button {
                     model.openRouterFolder()
@@ -465,13 +617,13 @@ struct ContentView: View {
                     Image(systemName: "folder")
                 }
                 .buttonStyle(.bordered)
-                .help("라우터 폴더 열기")
+                .help("Open router folder")
             }
 
             HStack(spacing: 6) {
                 Image(systemName: "shield.lefthalf.filled")
                     .foregroundStyle(Color.green.opacity(0.8))
-                Text("목표·일반 요청 모두 적용 · Luna → Terra → Sol 자동 최적화")
+                Text("All tasks · Luna → Terra → Sol · local classification")
                     .foregroundStyle(Color.white.opacity(0.5))
                 Spacer()
                 Text("PID \(model.controllerPid)")
@@ -525,7 +677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window = existing
         } else {
             let created = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 430, height: 520),
+                contentRect: NSRect(x: 0, y: 0, width: 430, height: 760),
                 styleMask: [.titled, .closable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
@@ -574,18 +726,18 @@ struct CodexAutoRouterWidgetApp: App {
 
     var body: some Scene {
         MenuBarExtra("Codex Auto Router", systemImage: "point.3.connected.trianglepath.dotted") {
-            Text(appDelegate.viewModel.isWatcherAlive ? "자동 모델 변경 작동 중" : "자동 모델 변경 중지됨")
+            Text(appDelegate.viewModel.isWatcherAlive ? "Automatic routing is active" : "Automatic routing is stopped")
             Divider()
-            Button("위젯 열기") {
+            Button("Open dashboard") {
                 appDelegate.showMainWindow()
             }
-            Button(appDelegate.viewModel.isWatcherAlive ? "자동 변경 중지" : "자동 변경 시작") {
+            Button(appDelegate.viewModel.isWatcherAlive ? "Stop routing" : "Start routing") {
                 appDelegate.viewModel.isWatcherAlive
                     ? appDelegate.viewModel.stopWatching()
                     : appDelegate.viewModel.startWatching()
             }
             Divider()
-            Button("종료") {
+            Button("Quit") {
                 NSApp.terminate(nil)
             }
         }

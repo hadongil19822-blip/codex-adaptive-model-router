@@ -33,9 +33,20 @@ The observer tracks:
 
 When an assistant announces a valid future action, the route is classified once and locked for that next step. This avoids model ping-pong as token counters update.
 
-## 3. Menu bar app
+## 3. Desktop dashboards
 
-The SwiftUI app reads `~/.codex/auto-router/runtime/state.json` once per second. It can start or stop the watcher but never performs classification itself.
+The macOS SwiftUI app and Windows PowerShell/WinForms tray app read `~/.codex/auto-router/runtime/state.json`. They can start or stop the watcher and edit usage-guard settings but never perform classification themselves.
+
+## 4. Weekly usage guard
+
+The watcher requests `account/rateLimits/read` from the local Codex app-server every five minutes and selects the longest Codex quota window. This is a local account-status request, not a model request, so it consumes no model tokens.
+
+The guard is opt-in. At or below the configured remaining percentage:
+
+1. Active turns continue to a safe boundary.
+2. Next-turn pre-arming and automatic follow-ups stop.
+3. The prompt-submit hook blocks new root-user prompts.
+4. Work becomes available again after the reported quota rises above the threshold or the guard is disabled.
 
 ## Interfaces
 
@@ -43,7 +54,8 @@ The SwiftUI app reads `~/.codex/auto-router/runtime/state.json` once per second.
 | --- | --- | --- |
 | Codex lifecycle hooks | Public Codex feature | Prompt-submit interception |
 | Local rollout JSONL | Observed implementation detail | Task discovery and telemetry |
-| Desktop follower IPC | Internal implementation detail | Next-turn model pre-arm |
+| Codex app-server | Documented local protocol | Usage status and cross-platform next-turn settings |
+| Desktop follower IPC | Internal macOS fallback | Next-turn model pre-arm compatibility |
 | `codex exec resume` | Public CLI command | Same-prompt reroute and continuation |
 
 ## Failure behavior

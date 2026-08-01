@@ -7,14 +7,16 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
 
 HOOK_PATH = Path.home() / ".codex" / "hooks.json"
-ROUTER_MARKER = ".codex/auto-router/codex_router.py"
-ROUTER_COMMAND = '/usr/bin/python3 "$HOME/.codex/auto-router/codex_router.py" prompt-hook'
+ROUTER_MARKER = "codex_router.py"
+_runtime_script = Path.home() / ".codex" / "auto-router" / "codex_router.py"
+ROUTER_COMMAND = f'"{sys.executable}" "{_runtime_script}" prompt-hook'
 
 
 def load_hooks() -> Dict[str, Any]:
@@ -31,7 +33,8 @@ def load_hooks() -> Dict[str, Any]:
 
 
 def is_router_handler(handler: Any) -> bool:
-    return isinstance(handler, dict) and ROUTER_MARKER in str(handler.get("command") or "")
+    command = str(handler.get("command") or "") if isinstance(handler, dict) else ""
+    return ROUTER_MARKER in command and "prompt-hook" in command
 
 
 def backup_existing() -> None:
@@ -55,8 +58,18 @@ def install() -> None:
     value = load_hooks()
     event_groups = value["hooks"].setdefault("UserPromptSubmit", [])
     for group in event_groups:
-        if any(is_router_handler(handler) for handler in group.get("hooks", [])):
-            print(f"Router hook is already installed: {HOOK_PATH}")
+        for handler in group.get("hooks", []):
+            if not is_router_handler(handler):
+                continue
+            if handler.get("command") == ROUTER_COMMAND:
+                print(f"Router hook is already installed: {HOOK_PATH}")
+                return
+            backup_existing()
+            handler["command"] = ROUTER_COMMAND
+            handler["timeout"] = 5
+            handler["statusMessage"] = "Selecting the best model for this task"
+            atomic_write(value)
+            print(f"Updated router hook: {HOOK_PATH}")
             return
     backup_existing()
     event_groups.append(
