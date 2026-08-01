@@ -1,0 +1,8 @@
+#!/bin/sh
+CODEX_ROUTER_ROOT="$HOME/.codex/auto-router"
+export CODEX_ROUTER_ROOT
+mkdir -p "$CODEX_ROUTER_ROOT"
+if [ ! -f "$CODEX_ROUTER_ROOT/router_config.json" ]; then
+  cp "$(dirname "$0")/router_config.json" "$CODEX_ROUTER_ROOT/router_config.json"
+fi
+exec /usr/bin/python3 "$(dirname "$0")/codex_router.py" "$@"

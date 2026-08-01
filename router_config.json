@@ -1,0 +1,51 @@
+{
+  "routes": [
+    {"max_score": -1, "tier": "luna_low", "model": "gpt-5.6-luna", "effort": "low"},
+    {"max_score": 0, "tier": "luna_medium", "model": "gpt-5.6-luna", "effort": "medium"},
+    {"max_score": 1, "tier": "luna_high", "model": "gpt-5.6-luna", "effort": "high"},
+    {"max_score": 2, "tier": "terra_low", "model": "gpt-5.6-terra", "effort": "low"},
+    {"max_score": 3, "tier": "terra_medium", "model": "gpt-5.6-terra", "effort": "medium"},
+    {"max_score": 4, "tier": "terra_high", "model": "gpt-5.6-terra", "effort": "high"},
+    {"max_score": 5, "tier": "sol_low", "model": "gpt-5.6-sol", "effort": "low"},
+    {"max_score": 6, "tier": "sol_medium", "model": "gpt-5.6-sol", "effort": "medium"},
+    {"max_score": 7, "tier": "sol_high", "model": "gpt-5.6-sol", "effort": "high"},
+    {"max_score": 9, "tier": "sol_xhigh", "model": "gpt-5.6-sol", "effort": "xhigh"},
+    {"max_score": 11, "tier": "sol_max", "model": "gpt-5.6-sol", "effort": "max"},
+    {"max_score": 999, "tier": "sol_ultra", "model": "gpt-5.6-sol", "effort": "ultra", "requires_parallel_signal": true}
+  ],
+  "model_capabilities": {
+    "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+    "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"]
+  },
+  "thresholds": {
+    "complex_score": 4,
+    "critical_score": 8,
+    "context_warn_ratio": 0.7,
+    "context_critical_ratio": 0.85,
+    "large_tool_output_bytes": 200000,
+    "failure_escalation_count": 2
+  },
+  "poll_interval_seconds": 0.25,
+  "discovery_interval_seconds": 5,
+  "activity_window_seconds": 1800,
+  "initial_tail_bytes": 33554432,
+  "excluded_thread_ids": [],
+  "strategy": "turn_boundary",
+  "auto_interrupt": false,
+  "auto_apply": true,
+  "prearm_next_turn": true,
+  "desktop_ipc_timeout_seconds": 3,
+  "prearm_retry_cooldown_seconds": 10,
+  "prompt_submit_reroute": true,
+  "prompt_submit_delay_seconds": 0.8,
+  "prompt_submit_notification": true,
+  "prompt_submit_skip_attachments": true,
+  "require_active_goal": false,
+  "resume_interrupted_goals": false,
+  "auto_apply_cooldown_seconds": 15,
+  "fallback_notifications": true,
+  "notification_cooldown_seconds": 300,
+  "goal_query_timeout_seconds": 5,
+  "continuation_prompt": "활성 목표를 계속 진행하세요. 직전에 선언한 다음 작업을 우선 수행하고, 전체 목표를 유지하세요."
+}

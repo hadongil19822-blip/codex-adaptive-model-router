@@ -1,0 +1,31 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile
+        run: python -m py_compile codex_router.py scripts/manage_hooks.py
+      - name: Test
+        run: python -m unittest discover -s tests -v
+
+  macos-widget:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build menu bar app
+        run: ./macos-widget/build-widget.sh

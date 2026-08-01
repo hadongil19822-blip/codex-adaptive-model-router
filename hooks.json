@@ -1,0 +1,17 @@
+{
+  "description": "Codex Auto Router: classify every user request before model tokens are spent.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$HOME/.codex/auto-router/codex_router.py\" prompt-hook",
+            "timeout": 5,
+            "statusMessage": "Selecting the best model for this task"
+          }
+        ]
+      }
+    ]
+  }
+}
