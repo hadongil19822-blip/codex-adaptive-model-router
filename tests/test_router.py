@@ -1,10 +1,12 @@
 import importlib.util
 import io
 import json
+import os
 import socket
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -466,9 +468,53 @@ Continue working toward the active thread goal.
         multi.thread_metadata = {
             "thread-1": {"name": "아팜", "cwd": "/Volumes/Data/개발/APT"}
         }
-        task = multi.snapshot()["tasks"][0]
+        snapshot = multi.snapshot()
+        task = snapshot["tasks"][0]
         self.assertEqual(task["task_name"], "아팜")
         self.assertEqual(task["cwd"], "/Volumes/Data/개발/APT")
+        self.assertEqual(snapshot["activity_window_seconds"], 600)
+
+    def test_discovery_hides_sessions_older_than_idle_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session_root = Path(temporary)
+            recent = session_root / "rollout-recent.jsonl"
+            old = session_root / "rollout-old.jsonl"
+            recent.write_text(
+                json.dumps({
+                    "type": "session_meta",
+                    "payload": {"id": "thread-recent", "thread_source": "user"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            old.write_text(
+                json.dumps({
+                    "type": "session_meta",
+                    "payload": {"id": "thread-old", "thread_source": "user"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            now = time.time()
+            os.utime(old, (now - 601, now - 601))
+            os.utime(recent, (now - 10, now - 10))
+            config = {**self.config, "activity_window_seconds": 600}
+            with patch.object(router, "SESSION_ROOT", session_root):
+                active = router.discover_active_root_sessions(config)
+        self.assertIn("thread-recent", active)
+        self.assertNotIn("thread-old", active)
+
+    def test_idle_filter_keeps_a_turn_that_is_still_running(self):
+        state = router.RouterState(thread_id="thread-active", turn_active=True)
+        watched = router.WatchedRollout(
+            Path("/tmp/test.jsonl"),
+            type("Observer", (), {"state": state})(),
+            0,
+            0,
+        )
+        multi = router.MultiRolloutObserver(self.config)
+        multi.tasks = {"thread-active": watched}
+        with patch.object(router, "discover_active_root_sessions", return_value={}):
+            multi.refresh_discovery(force=True)
+        self.assertIn("thread-active", multi.tasks)
 
     def test_cached_thread_metadata_survives_watcher_restart(self):
         with tempfile.TemporaryDirectory() as temporary:

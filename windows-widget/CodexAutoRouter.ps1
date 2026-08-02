@@ -23,8 +23,8 @@ function New-Label([string]$Text, [int]$X, [int]$Y, [int]$Width, [int]$Height, [
 
 $Form = New-Object System.Windows.Forms.Form
 $Form.Text = "Codex Adaptive Model Router"
-$Form.Size = New-Object System.Drawing.Size(470, 700)
-$Form.MinimumSize = New-Object System.Drawing.Size(470, 700)
+$Form.Size = New-Object System.Drawing.Size(470, 760)
+$Form.MinimumSize = New-Object System.Drawing.Size(470, 760)
 $Form.StartPosition = "CenterScreen"
 $Form.BackColor = [System.Drawing.Color]::FromArgb(15, 20, 32)
 $Form.ForeColor = [System.Drawing.Color]::White
@@ -84,9 +84,21 @@ $ThresholdPlus.Size = New-Object System.Drawing.Size(32, 30)
 $GuardNote = New-Label "Safe stop: active turns finish; new prompts and automatic follow-ups wait." 20 306 420 32 8 $false
 $GuardNote.ForeColor = [System.Drawing.Color]::FromArgb(145, 155, 170)
 
-$TasksTitle = New-Label "ACTIVE TASKS" 20 350 200 20 9 $true
+$IdleLabel = New-Label "Hide tasks idle for" 20 348 210 24 9 $false
+$IdleMinutes = New-Object System.Windows.Forms.NumericUpDown
+$IdleMinutes.Location = New-Object System.Drawing.Point(286, 344)
+$IdleMinutes.Size = New-Object System.Drawing.Size(78, 28)
+$IdleMinutes.Minimum = 1
+$IdleMinutes.Maximum = 120
+$IdleMinutes.Increment = 1
+$IdleMinutes.Value = 10
+$IdleMinutes.TextAlign = "Right"
+$IdleSuffix = New-Label "minutes" 370 348 60 24 9 $false
+$IdleSuffix.TextAlign = "MiddleLeft"
+
+$TasksTitle = New-Label "ACTIVE TASKS" 20 388 200 20 9 $true
 $Tasks = New-Object System.Windows.Forms.TextBox
-$Tasks.Location = New-Object System.Drawing.Point(20, 374)
+$Tasks.Location = New-Object System.Drawing.Point(20, 412)
 $Tasks.Size = New-Object System.Drawing.Size(410, 205)
 $Tasks.Multiline = $true
 $Tasks.ReadOnly = $true
@@ -98,20 +110,22 @@ $Tasks.Font = New-Object System.Drawing.Font("Consolas", 9)
 
 $OpenFolder = New-Object System.Windows.Forms.Button
 $OpenFolder.Text = "Open router folder"
-$OpenFolder.Location = New-Object System.Drawing.Point(20, 596)
+$OpenFolder.Location = New-Object System.Drawing.Point(20, 634)
 $OpenFolder.Size = New-Object System.Drawing.Size(410, 34)
-$Message = New-Label "Ready" 20 638 410 22 8 $false
+$Message = New-Label "Ready" 20 676 410 22 8 $false
 $Message.ForeColor = [System.Drawing.Color]::FromArgb(145, 155, 170)
 
 $Form.Controls.AddRange(@(
     $Title, $Subtitle, $Status, $ToggleRouter, $UsageTitle, $UsageValue, $UsageReset, $UsageBar,
     $GuardCheck, $ThresholdLabel, $ThresholdMinus, $ThresholdBar, $ThresholdValue, $ThresholdPlus, $GuardNote,
-    $TasksTitle, $Tasks, $OpenFolder, $Message
+    $IdleLabel, $IdleMinutes, $IdleSuffix, $TasksTitle, $Tasks, $OpenFolder, $Message
 ))
 
 $script:WatcherAlive = $false
 $script:GuardControlsLoaded = $false
 $script:SuppressGuardSave = $false
+$script:IdleControlLoaded = $false
+$script:SuppressIdleSave = $false
 
 function Test-ProcessAlive([int]$ProcessId) {
     if ($ProcessId -le 0) { return $false }
@@ -156,6 +170,22 @@ function Save-GuardSettings {
     }
 }
 
+function Save-IdleSettings {
+    try {
+        $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        $minutes = [Math]::Max(1, [Math]::Min(120, [int]$IdleMinutes.Value))
+        Set-ObjectProperty $config "activity_window_seconds" ($minutes * 60)
+        $temporary = "$ConfigFile.tmp"
+        $json = $config | ConvertTo-Json -Depth 20
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($temporary, $json, $utf8NoBom)
+        Move-Item -Force $temporary $ConfigFile
+        $Message.Text = "Idle task filter saved."
+    } catch {
+        $Message.Text = "Could not save idle task filter: $($_.Exception.Message)"
+    }
+}
+
 function Refresh-Dashboard {
     try {
         $state = Get-Content $StateFile -Raw | ConvertFrom-Json
@@ -194,6 +224,14 @@ function Refresh-Dashboard {
         }
         if ($state.usage_guard -and $state.usage_guard.paused) { $UsageValue.ForeColor = [System.Drawing.Color]::Orange }
         else { $UsageValue.ForeColor = [System.Drawing.Color]::White }
+
+        if ($state.activity_window_seconds -and -not $script:IdleControlLoaded) {
+            $script:SuppressIdleSave = $true
+            $minutes = [Math]::Max(1, [Math]::Min(120, [int][Math]::Round([double]$state.activity_window_seconds / 60)))
+            $IdleMinutes.Value = $minutes
+            $script:SuppressIdleSave = $false
+            $script:IdleControlLoaded = $true
+        }
 
         $lines = New-Object System.Collections.Generic.List[string]
         foreach ($task in @($state.tasks)) {
@@ -250,6 +288,9 @@ $ThresholdMinus.Add_Click({
 })
 $ThresholdPlus.Add_Click({
     if ($ThresholdBar.Value -lt $ThresholdBar.Maximum) { $ThresholdBar.Value += 1 }
+})
+$IdleMinutes.Add_ValueChanged({
+    if ($script:IdleControlLoaded -and -not $script:SuppressIdleSave) { Save-IdleSettings }
 })
 $OpenFolder.Add_Click({ Start-Process explorer.exe $RuntimeRoot })
 $ExitItem.Add_Click({ $Tray.Visible = $false; $Tray.Dispose(); $Form.Dispose(); [System.Windows.Forms.Application]::Exit() })

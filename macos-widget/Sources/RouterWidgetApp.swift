@@ -72,6 +72,7 @@ struct RouterEnvelope: Codable {
     var running: Bool?
     var watcherPid: Int?
     var activeTaskCount: Int?
+    var activityWindowSeconds: Int?
     var updatedAt: String?
     var mode: String?
     var strategy: String?
@@ -114,6 +115,8 @@ final class RouterViewModel: ObservableObject {
     @Published var guardEnabled = false
     @Published var guardThreshold = 10.0
     @Published var guardSettingsDirty = false
+    @Published var idleTimeoutMinutes = 10.0
+    @Published var idleSettingsDirty = false
     @Published var lastRefresh = Date()
 
     private var timer: Timer?
@@ -150,6 +153,16 @@ final class RouterViewModel: ObservableObject {
                 } else {
                     guardEnabled = envelope.usageGuard?.enabled ?? guardEnabled
                     guardThreshold = envelope.usageGuard?.pauseAtRemainingPercent ?? guardThreshold
+                }
+                if let activityWindowSeconds = envelope.activityWindowSeconds {
+                    let savedMinutes = Double(max(60, activityWindowSeconds)) / 60.0
+                    if idleSettingsDirty {
+                        if abs(savedMinutes - idleTimeoutMinutes) < 0.5 {
+                            idleSettingsDirty = false
+                        }
+                    } else {
+                        idleTimeoutMinutes = savedMinutes
+                    }
                 }
             } else {
                 let decoded = try decoder.decode(RouterState.self, from: data)
@@ -202,6 +215,23 @@ final class RouterViewModel: ObservableObject {
             message = "Usage guard settings saved. The watcher reloads them automatically."
         } catch {
             message = "Could not save usage guard settings: \(error.localizedDescription)"
+        }
+    }
+
+    func saveIdleTimeout() {
+        do {
+            let data = try Data(contentsOf: liveConfigFile)
+            guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let minutes = min(max(Int(idleTimeoutMinutes.rounded()), 1), 120)
+            idleTimeoutMinutes = Double(minutes)
+            root["activity_window_seconds"] = minutes * 60
+            let updated = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            try updated.write(to: liveConfigFile, options: .atomic)
+            message = "Idle task filter saved. The list updates automatically."
+        } catch {
+            message = "Could not save idle task filter: \(error.localizedDescription)"
         }
     }
 
@@ -684,6 +714,58 @@ struct UsageCard: View {
     }
 }
 
+struct TaskVisibilityControl: View {
+    @EnvironmentObject var model: RouterViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "clock.badge.xmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.cyan)
+                .frame(width: 30, height: 30)
+                .background(Color.cyan.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("HIDE IDLE TASKS")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.52))
+                Text("Show again automatically when activity resumes")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.white.opacity(0.34))
+            }
+
+            Spacer(minLength: 8)
+
+            Stepper(
+                value: Binding(
+                    get: { model.idleTimeoutMinutes },
+                    set: {
+                        model.idleTimeoutMinutes = min(max($0, 1), 120)
+                        model.idleSettingsDirty = true
+                        model.saveIdleTimeout()
+                    }
+                ),
+                in: 1...120,
+                step: 1
+            ) {
+                Text("\(Int(model.idleTimeoutMinutes)) min")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 50, alignment: .trailing)
+            }
+            .accessibilityLabel("Hide tasks after idle minutes")
+            .accessibilityValue("\(Int(model.idleTimeoutMinutes)) minutes")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(Color.cyan.opacity(0.12), lineWidth: 1)
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: RouterViewModel
 
@@ -709,6 +791,9 @@ struct ContentView: View {
                 .environmentObject(model)
 
             UsageCard()
+                .environmentObject(model)
+
+            TaskVisibilityControl()
                 .environmentObject(model)
 
             VStack(spacing: 10) {

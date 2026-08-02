@@ -692,7 +692,7 @@ def read_session_meta(path: Path) -> Dict[str, Any]:
 
 
 def discover_active_root_sessions(config: Dict[str, Any]) -> Dict[str, Tuple[Path, float]]:
-    cutoff = time.time() - int(config.get("activity_window_seconds", 1800))
+    cutoff = time.time() - max(60, int(config.get("activity_window_seconds", 600)))
     excluded_thread_ids = {
         str(value) for value in config.get("excluded_thread_ids", []) if value
     }
@@ -1379,6 +1379,8 @@ class MultiRolloutObserver:
                 watched.activity_at = max(watched.activity_at, activity_at)
         for thread_id in list(self.tasks):
             if thread_id not in active:
+                if self.tasks[thread_id].observer.state.turn_active:
+                    continue
                 del self.tasks[thread_id]
 
     def _initialize(self, path: Path, activity_at: float) -> WatchedRollout:
@@ -1733,6 +1735,9 @@ class MultiRolloutObserver:
             "running": running,
             "watcher_pid": os.getpid(),
             "active_task_count": len(task_states),
+            "activity_window_seconds": max(
+                60, int(self.config.get("activity_window_seconds", 600))
+            ),
             "updated_at": utc_now(),
             "mode": "multi_auto_apply" if self.config.get("auto_apply") else "multi_observe",
             "strategy": self.config.get("strategy", "turn_boundary"),

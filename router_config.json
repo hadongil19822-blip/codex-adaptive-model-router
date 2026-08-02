@@ -38,7 +38,7 @@
     "query_timeout_seconds": 3,
     "mode": "safe_turn_boundary"
   },
-  "activity_window_seconds": 1800,
+  "activity_window_seconds": 600,
   "initial_tail_bytes": 33554432,
   "excluded_thread_ids": [],
   "strategy": "turn_boundary",

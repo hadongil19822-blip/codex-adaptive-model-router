@@ -123,6 +123,8 @@ Change route thresholds, model slugs, supported efforts, cooldowns, notification
 
 The dashboard also exposes an opt-in weekly usage guard. Its default is off. When enabled and the remaining weekly quota reaches the selected threshold, active turns are allowed to finish safely while new prompts and automatic follow-ups are paused. The watcher refreshes the local quota snapshot every 30 seconds; this status check does not call a model or consume model tokens.
 
+The active-task list hides tasks after 10 minutes without activity by default. Use the dashboard's **Hide idle tasks** control to choose any timeout from 1 to 120 minutes. A hidden task returns automatically as soon as Codex writes new activity to it.
+
 For pattern changes and new task categories, see [Customization Guide](docs/CUSTOMIZATION.md). For internal flow and safety boundaries, see [Architecture](docs/ARCHITECTURE.md).
 
 ## Safety and privacy
