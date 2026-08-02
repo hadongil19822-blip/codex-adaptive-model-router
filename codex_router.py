@@ -121,6 +121,7 @@ class Decision:
 @dataclass
 class RouterState:
     thread_id: str = ""
+    task_name: str = ""
     session_path: str = ""
     cwd: str = ""
     current_model: str = ""
@@ -1120,6 +1121,60 @@ def query_thread_goal(thread_id: str, timeout: float = 5.0) -> Dict[str, Any]:
         return {}
 
 
+def parse_thread_metadata(result: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """Return user-facing titles and current working directories by thread id."""
+    metadata: Dict[str, Dict[str, str]] = {}
+    for value in result.get("data") or []:
+        if not isinstance(value, dict):
+            continue
+        thread_id = str(value.get("id") or value.get("sessionId") or "")
+        if not thread_id:
+            continue
+        metadata[thread_id] = {
+            "name": str(value.get("name") or "").strip(),
+            "cwd": str(value.get("cwd") or "").strip(),
+        }
+    return metadata
+
+
+def query_thread_metadata(timeout: float = 3.0) -> Dict[str, Dict[str, str]]:
+    """Read Codex task titles locally. This does not invoke a model or use tokens."""
+    try:
+        result = _app_server_request(
+            "thread/list",
+            {
+                "limit": 200,
+                "sortKey": "recency_at",
+                "sortDirection": "desc",
+                "useStateDbOnly": True,
+            },
+            timeout=timeout,
+        )
+        return parse_thread_metadata(result)
+    except (OSError, RuntimeError, TimeoutError, ValueError, subprocess.SubprocessError):
+        return {}
+
+
+def cached_thread_metadata(path: Path = STATE_PATH) -> Dict[str, Dict[str, str]]:
+    """Keep recognizable task labels available while the local app-server reconnects."""
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    metadata: Dict[str, Dict[str, str]] = {}
+    for value in state.get("tasks") or []:
+        if not isinstance(value, dict):
+            continue
+        thread_id = str(value.get("thread_id") or "")
+        if not thread_id:
+            continue
+        metadata[thread_id] = {
+            "name": str(value.get("task_name") or "").strip(),
+            "cwd": str(value.get("cwd") or "").strip(),
+        }
+    return metadata
+
+
 def parse_weekly_usage(result: Dict[str, Any]) -> UsageSnapshot:
     """Normalize the Codex quota bucket with the longest rolling window."""
     buckets = result.get("rateLimitsByLimitId") or {}
@@ -1230,6 +1285,8 @@ class MultiRolloutObserver:
         self.last_prearm_attempt: Dict[str, float] = {}
         self.usage = UsageSnapshot(updated_at=utc_now())
         self.last_usage_refresh = 0.0
+        self.thread_metadata: Dict[str, Dict[str, str]] = cached_thread_metadata()
+        self.last_thread_metadata_refresh = 0.0
         self.last_config_check = 0.0
         try:
             self.config_mtime = CONFIG_PATH.stat().st_mtime
@@ -1268,6 +1325,21 @@ class MultiRolloutObserver:
 
     def _usage_paused(self) -> bool:
         return usage_guard_is_paused(self.config, self.usage)
+
+    def _refresh_thread_metadata(self, force: bool = False) -> None:
+        interval = float(self.config.get("thread_metadata_poll_interval_seconds", 30))
+        now = time.monotonic()
+        if not force and now - self.last_thread_metadata_refresh < interval:
+            return
+        updated = query_thread_metadata(
+            timeout=float(self.config.get("thread_metadata_query_timeout_seconds", 3))
+        )
+        if updated:
+            self.thread_metadata = updated
+            self.last_thread_metadata_refresh = now
+        else:
+            retry = min(2.0, interval)
+            self.last_thread_metadata_refresh = now - max(0.0, interval - retry)
 
     def _notify_manual_action(
         self,
@@ -1339,6 +1411,7 @@ class MultiRolloutObserver:
     def poll(self) -> None:
         self._reload_config()
         self._refresh_usage()
+        self._refresh_thread_metadata()
         self.refresh_discovery()
         self._reap_auto_runs()
         for thread_id, watched in list(self.tasks.items()):
@@ -1644,6 +1717,11 @@ class MultiRolloutObserver:
         ordered = sorted(self.tasks.values(), key=lambda item: item.activity_at, reverse=True)
         task_states: List[Dict[str, Any]] = []
         for watched in ordered:
+            metadata = self.thread_metadata.get(watched.observer.state.thread_id) or {}
+            if metadata.get("name"):
+                watched.observer.state.task_name = metadata["name"]
+            if metadata.get("cwd"):
+                watched.observer.state.cwd = metadata["cwd"]
             watched.observer.state.watcher_pid = os.getpid()
             watched.observer.state.running = running
             watched.observer.state.updated_at = utc_now()

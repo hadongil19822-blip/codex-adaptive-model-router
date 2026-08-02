@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Synced dashboard labels with user-facing Codex task titles instead of stale folder names.
+- Added a circular weekly-usage dial and an always-visible routing on/off switch on macOS.
+- Added 1–100% usage-guard sliders with −/+ controls and immediate saving on macOS and Windows.
 - Added weekly Codex quota remaining to the desktop dashboards.
 - Added an opt-in safe-boundary usage guard with a configurable threshold.
 - Made English the default dashboard language while retaining Korean classification.

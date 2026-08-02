@@ -439,6 +439,50 @@ Continue working toward the active thread goal.
         self.assertEqual(usage.window_duration_mins, 10080)
         self.assertEqual(usage.reset_credits, 1)
 
+    def test_thread_metadata_uses_codex_task_title_and_current_cwd(self):
+        metadata = router.parse_thread_metadata({
+            "data": [{
+                "id": "thread-1",
+                "name": "아팜",
+                "cwd": "/Volumes/Data/개발/APT",
+            }],
+        })
+        self.assertEqual(metadata["thread-1"]["name"], "아팜")
+        self.assertEqual(metadata["thread-1"]["cwd"], "/Volumes/Data/개발/APT")
+
+    def test_snapshot_prefers_live_codex_task_metadata(self):
+        state = router.RouterState(
+            thread_id="thread-1",
+            cwd="/tmp/old-github-folder",
+        )
+        watched = router.WatchedRollout(
+            Path("/tmp/test.jsonl"),
+            type("Observer", (), {"state": state})(),
+            0,
+            0,
+        )
+        multi = router.MultiRolloutObserver(self.config)
+        multi.tasks = {"thread-1": watched}
+        multi.thread_metadata = {
+            "thread-1": {"name": "아팜", "cwd": "/Volumes/Data/개발/APT"}
+        }
+        task = multi.snapshot()["tasks"][0]
+        self.assertEqual(task["task_name"], "아팜")
+        self.assertEqual(task["cwd"], "/Volumes/Data/개발/APT")
+
+    def test_cached_thread_metadata_survives_watcher_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "state.json"
+            state_path.write_text(json.dumps({
+                "tasks": [{
+                    "thread_id": "thread-1",
+                    "task_name": "아팜",
+                    "cwd": "/Volumes/Data/개발/APT",
+                }],
+            }), encoding="utf-8")
+            metadata = router.cached_thread_metadata(state_path)
+        self.assertEqual(metadata["thread-1"]["name"], "아팜")
+
     def test_usage_guard_is_opt_in_and_pauses_at_threshold(self):
         usage = router.UsageSnapshot(available=True, remaining_percent=9)
         self.assertFalse(router.usage_guard_is_paused(self.config, usage))
@@ -447,6 +491,24 @@ Continue working toward the active thread goal.
             "usage_guard": {"enabled": True, "pause_at_remaining_percent": 10},
         }
         self.assertTrue(router.usage_guard_is_paused(enabled, usage))
+
+    def test_usage_guard_can_stop_at_seventy_nine_percent_remaining(self):
+        enabled = {
+            **self.config,
+            "usage_guard": {"enabled": True, "pause_at_remaining_percent": 79},
+        }
+        self.assertFalse(
+            router.usage_guard_is_paused(
+                enabled,
+                router.UsageSnapshot(available=True, remaining_percent=81),
+            )
+        )
+        self.assertTrue(
+            router.usage_guard_is_paused(
+                enabled,
+                router.UsageSnapshot(available=True, remaining_percent=79),
+            )
+        )
 
     def test_usage_guard_blocks_a_new_prompt_before_routing(self):
         hook_input = {

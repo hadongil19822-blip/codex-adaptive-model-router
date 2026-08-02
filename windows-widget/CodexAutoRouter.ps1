@@ -23,8 +23,8 @@ function New-Label([string]$Text, [int]$X, [int]$Y, [int]$Width, [int]$Height, [
 
 $Form = New-Object System.Windows.Forms.Form
 $Form.Text = "Codex Adaptive Model Router"
-$Form.Size = New-Object System.Drawing.Size(470, 650)
-$Form.MinimumSize = New-Object System.Drawing.Size(470, 650)
+$Form.Size = New-Object System.Drawing.Size(470, 700)
+$Form.MinimumSize = New-Object System.Drawing.Size(470, 700)
 $Form.StartPosition = "CenterScreen"
 $Form.BackColor = [System.Drawing.Color]::FromArgb(15, 20, 32)
 $Form.ForeColor = [System.Drawing.Color]::White
@@ -36,43 +36,57 @@ $Subtitle.ForeColor = [System.Drawing.Color]::FromArgb(70, 205, 220)
 $Status = New-Label "CHECKING STATUS" 345 22 105 22 8 $true
 $Status.TextAlign = "MiddleRight"
 
-$UsageTitle = New-Label "WEEKLY CODEX USAGE" 20 88 260 18 9 $true
-$UsageValue = New-Label "Usage unavailable" 20 108 300 35 18 $true
-$UsageReset = New-Label "Reset time unavailable" 20 143 410 18 8 $false
+$ToggleRouter = New-Object System.Windows.Forms.Button
+$ToggleRouter.Text = "TURN ROUTING ON"
+$ToggleRouter.Location = New-Object System.Drawing.Point(20, 78)
+$ToggleRouter.Size = New-Object System.Drawing.Size(410, 40)
+$ToggleRouter.FlatStyle = "Flat"
+$ToggleRouter.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+
+$UsageTitle = New-Label "WEEKLY CODEX USAGE" 20 136 260 18 9 $true
+$UsageValue = New-Label "Usage unavailable" 20 156 300 35 18 $true
+$UsageReset = New-Label "Reset time unavailable" 20 191 410 18 8 $false
 $UsageReset.ForeColor = [System.Drawing.Color]::FromArgb(145, 155, 170)
 $UsageBar = New-Object System.Windows.Forms.ProgressBar
-$UsageBar.Location = New-Object System.Drawing.Point(20, 168)
+$UsageBar.Location = New-Object System.Drawing.Point(20, 216)
 $UsageBar.Size = New-Object System.Drawing.Size(410, 10)
 $UsageBar.Minimum = 0
 $UsageBar.Maximum = 100
 
 $GuardCheck = New-Object System.Windows.Forms.CheckBox
 $GuardCheck.Text = "Pause new work when weekly usage is low"
-$GuardCheck.Location = New-Object System.Drawing.Point(20, 195)
+$GuardCheck.Location = New-Object System.Drawing.Point(20, 243)
 $GuardCheck.Size = New-Object System.Drawing.Size(320, 24)
 $GuardCheck.ForeColor = [System.Drawing.Color]::White
 $GuardCheck.BackColor = [System.Drawing.Color]::Transparent
 
-$ThresholdLabel = New-Label "Pause at" 42 225 65 24 9 $false
-$Threshold = New-Object System.Windows.Forms.NumericUpDown
-$Threshold.Location = New-Object System.Drawing.Point(110, 224)
-$Threshold.Size = New-Object System.Drawing.Size(65, 24)
-$Threshold.Minimum = 1
-$Threshold.Maximum = 50
-$Threshold.Value = 10
-$Threshold.DecimalPlaces = 0
-$PercentLabel = New-Label "% remaining" 180 225 100 24 9 $false
-$SaveGuard = New-Object System.Windows.Forms.Button
-$SaveGuard.Text = "Save settings"
-$SaveGuard.Location = New-Object System.Drawing.Point(320, 221)
-$SaveGuard.Size = New-Object System.Drawing.Size(110, 30)
+$ThresholdLabel = New-Label "Stop at" 20 273 58 24 9 $false
+$ThresholdMinus = New-Object System.Windows.Forms.Button
+$ThresholdMinus.Text = "-"
+$ThresholdMinus.Location = New-Object System.Drawing.Point(80, 268)
+$ThresholdMinus.Size = New-Object System.Drawing.Size(32, 30)
+$ThresholdBar = New-Object System.Windows.Forms.TrackBar
+$ThresholdBar.Location = New-Object System.Drawing.Point(116, 266)
+$ThresholdBar.Size = New-Object System.Drawing.Size(220, 38)
+$ThresholdBar.Minimum = 1
+$ThresholdBar.Maximum = 100
+$ThresholdBar.TickFrequency = 10
+$ThresholdBar.SmallChange = 1
+$ThresholdBar.LargeChange = 5
+$ThresholdBar.Value = 10
+$ThresholdValue = New-Label "10%" 338 273 54 24 10 $true
+$ThresholdValue.TextAlign = "MiddleCenter"
+$ThresholdPlus = New-Object System.Windows.Forms.Button
+$ThresholdPlus.Text = "+"
+$ThresholdPlus.Location = New-Object System.Drawing.Point(398, 268)
+$ThresholdPlus.Size = New-Object System.Drawing.Size(32, 30)
 
-$GuardNote = New-Label "Safe mode: active turns finish; new prompts and automatic follow-ups pause." 20 258 420 32 8 $false
+$GuardNote = New-Label "Safe stop: active turns finish; new prompts and automatic follow-ups wait." 20 306 420 32 8 $false
 $GuardNote.ForeColor = [System.Drawing.Color]::FromArgb(145, 155, 170)
 
-$TasksTitle = New-Label "ACTIVE TASKS" 20 302 200 20 9 $true
+$TasksTitle = New-Label "ACTIVE TASKS" 20 350 200 20 9 $true
 $Tasks = New-Object System.Windows.Forms.TextBox
-$Tasks.Location = New-Object System.Drawing.Point(20, 326)
+$Tasks.Location = New-Object System.Drawing.Point(20, 374)
 $Tasks.Size = New-Object System.Drawing.Size(410, 205)
 $Tasks.Multiline = $true
 $Tasks.ReadOnly = $true
@@ -82,25 +96,22 @@ $Tasks.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 240)
 $Tasks.BorderStyle = "FixedSingle"
 $Tasks.Font = New-Object System.Drawing.Font("Consolas", 9)
 
-$ToggleRouter = New-Object System.Windows.Forms.Button
-$ToggleRouter.Text = "Start routing"
-$ToggleRouter.Location = New-Object System.Drawing.Point(20, 550)
-$ToggleRouter.Size = New-Object System.Drawing.Size(200, 36)
 $OpenFolder = New-Object System.Windows.Forms.Button
 $OpenFolder.Text = "Open router folder"
-$OpenFolder.Location = New-Object System.Drawing.Point(230, 550)
-$OpenFolder.Size = New-Object System.Drawing.Size(200, 36)
-$Message = New-Label "Ready" 20 594 410 22 8 $false
+$OpenFolder.Location = New-Object System.Drawing.Point(20, 596)
+$OpenFolder.Size = New-Object System.Drawing.Size(410, 34)
+$Message = New-Label "Ready" 20 638 410 22 8 $false
 $Message.ForeColor = [System.Drawing.Color]::FromArgb(145, 155, 170)
 
 $Form.Controls.AddRange(@(
-    $Title, $Subtitle, $Status, $UsageTitle, $UsageValue, $UsageReset, $UsageBar,
-    $GuardCheck, $ThresholdLabel, $Threshold, $PercentLabel, $SaveGuard, $GuardNote,
-    $TasksTitle, $Tasks, $ToggleRouter, $OpenFolder, $Message
+    $Title, $Subtitle, $Status, $ToggleRouter, $UsageTitle, $UsageValue, $UsageReset, $UsageBar,
+    $GuardCheck, $ThresholdLabel, $ThresholdMinus, $ThresholdBar, $ThresholdValue, $ThresholdPlus, $GuardNote,
+    $TasksTitle, $Tasks, $OpenFolder, $Message
 ))
 
 $script:WatcherAlive = $false
 $script:GuardControlsLoaded = $false
+$script:SuppressGuardSave = $false
 
 function Test-ProcessAlive([int]$ProcessId) {
     if ($ProcessId -le 0) { return $false }
@@ -132,7 +143,7 @@ function Save-GuardSettings {
             $config | Add-Member -NotePropertyName usage_guard -NotePropertyValue ([PSCustomObject]@{})
         }
         Set-ObjectProperty $config.usage_guard "enabled" ([bool]$GuardCheck.Checked)
-        Set-ObjectProperty $config.usage_guard "pause_at_remaining_percent" ([int]$Threshold.Value)
+        Set-ObjectProperty $config.usage_guard "pause_at_remaining_percent" ([int]$ThresholdBar.Value)
         Set-ObjectProperty $config.usage_guard "mode" "safe_turn_boundary"
         $temporary = "$ConfigFile.tmp"
         $json = $config | ConvertTo-Json -Depth 20
@@ -152,7 +163,9 @@ function Refresh-Dashboard {
         $script:WatcherAlive = [bool]$state.running -and (Test-ProcessAlive $pidValue)
         $Status.Text = if ($script:WatcherAlive) { "ROUTING ACTIVE" } else { "STOPPED" }
         $Status.ForeColor = if ($script:WatcherAlive) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.Color]::Salmon }
-        $ToggleRouter.Text = if ($script:WatcherAlive) { "Stop routing" } else { "Start routing" }
+        $ToggleRouter.Text = if ($script:WatcherAlive) { "TURN ROUTING OFF" } else { "TURN ROUTING ON" }
+        $ToggleRouter.BackColor = if ($script:WatcherAlive) { [System.Drawing.Color]::FromArgb(92, 38, 45) } else { [System.Drawing.Color]::FromArgb(28, 86, 65) }
+        $ToggleRouter.ForeColor = [System.Drawing.Color]::White
 
         if ($state.usage -and $state.usage.available) {
             $remaining = [Math]::Max(0, [Math]::Min(100, [double]$state.usage.remaining_percent))
@@ -168,9 +181,15 @@ function Refresh-Dashboard {
         }
 
         if ($state.usage_guard -and -not $script:GuardControlsLoaded) {
+            $script:SuppressGuardSave = $true
             $GuardCheck.Checked = [bool]$state.usage_guard.enabled
-            $value = [Math]::Max(1, [Math]::Min(50, [int]$state.usage_guard.pause_at_remaining_percent))
-            $Threshold.Value = $value
+            $value = [Math]::Max(1, [Math]::Min(100, [int]$state.usage_guard.pause_at_remaining_percent))
+            $ThresholdBar.Value = $value
+            $ThresholdValue.Text = "$value%"
+            $ThresholdBar.Enabled = $GuardCheck.Checked
+            $ThresholdMinus.Enabled = $GuardCheck.Checked
+            $ThresholdPlus.Enabled = $GuardCheck.Checked
+            $script:SuppressGuardSave = $false
             $script:GuardControlsLoaded = $true
         }
         if ($state.usage_guard -and $state.usage_guard.paused) { $UsageValue.ForeColor = [System.Drawing.Color]::Orange }
@@ -178,7 +197,7 @@ function Refresh-Dashboard {
 
         $lines = New-Object System.Collections.Generic.List[string]
         foreach ($task in @($state.tasks)) {
-            $project = if ($task.cwd) { Split-Path $task.cwd -Leaf } else { "Unknown task" }
+            $project = if ($task.task_name) { [string]$task.task_name } elseif ($task.cwd) { Split-Path $task.cwd -Leaf } else { "Unknown task" }
             $current = "$($task.current_model) / $($task.current_effort)"
             $next = if ($task.decision) { "$($task.decision.model) / $($task.decision.effort)" } else { "Analyzing" }
             $lines.Add("$project`r`n  Current: $current`r`n  Next:    $next`r`n  Status:  $($task.auto_apply_status)`r`n")
@@ -216,7 +235,22 @@ $ToggleRouter.Add_Click({
     else { Invoke-Router @("watch", "--all", "--daemon") }
     Refresh-Dashboard
 })
-$SaveGuard.Add_Click({ Save-GuardSettings; Refresh-Dashboard })
+$GuardCheck.Add_CheckedChanged({
+    $ThresholdBar.Enabled = $GuardCheck.Checked
+    $ThresholdMinus.Enabled = $GuardCheck.Checked
+    $ThresholdPlus.Enabled = $GuardCheck.Checked
+    if ($script:GuardControlsLoaded -and -not $script:SuppressGuardSave) { Save-GuardSettings }
+})
+$ThresholdBar.Add_ValueChanged({
+    $ThresholdValue.Text = "$($ThresholdBar.Value)%"
+    if ($script:GuardControlsLoaded -and -not $script:SuppressGuardSave) { Save-GuardSettings }
+})
+$ThresholdMinus.Add_Click({
+    if ($ThresholdBar.Value -gt $ThresholdBar.Minimum) { $ThresholdBar.Value -= 1 }
+})
+$ThresholdPlus.Add_Click({
+    if ($ThresholdBar.Value -lt $ThresholdBar.Maximum) { $ThresholdBar.Value += 1 }
+})
 $OpenFolder.Add_Click({ Start-Process explorer.exe $RuntimeRoot })
 $ExitItem.Add_Click({ $Tray.Visible = $false; $Tray.Dispose(); $Form.Dispose(); [System.Windows.Forms.Application]::Exit() })
 $Form.Add_FormClosing({

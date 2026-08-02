@@ -22,8 +22,9 @@ No classifier model is called. Routing uses transparent regular expressions, tas
 - **Uses 12 cost bands** across Luna, Terra, and Sol.
 - **Pre-arms announced follow-up work** before the next turn starts.
 - **Monitors multiple Codex tasks independently.**
+- **Uses the titles shown in Codex** so dashboard task names stay recognizable after a handoff or worktree change.
 - **Shows weekly Codex quota remaining** without spending model tokens.
-- **Offers an opt-in usage guard** that pauses new work at a configurable threshold.
+- **Offers an opt-in usage guard** with a 1–100% slider and −/+ buttons that pause new work at the selected remaining percentage.
 - **Protects attachments, explicit model choices, and subagent sessions** from unsafe rerouting.
 - **Ships with a native SwiftUI menu bar monitor** for macOS.
 - **Ships with a dependency-free PowerShell/WinForms tray monitor** for Windows.
@@ -120,7 +121,7 @@ Your live configuration is stored at:
 
 Change route thresholds, model slugs, supported efforts, cooldowns, notification behavior, or prompt rerouting without editing Python. The installer preserves an existing live configuration on upgrade.
 
-The dashboard also exposes an opt-in weekly usage guard. Its default is off. When enabled and the remaining weekly quota reaches the selected threshold, active turns are allowed to finish safely while new prompts and automatic follow-ups are paused. The watcher refreshes the local quota snapshot every five minutes; this status check does not call a model or consume model tokens.
+The dashboard also exposes an opt-in weekly usage guard. Its default is off. When enabled and the remaining weekly quota reaches the selected threshold, active turns are allowed to finish safely while new prompts and automatic follow-ups are paused. The watcher refreshes the local quota snapshot every 30 seconds; this status check does not call a model or consume model tokens.
 
 For pattern changes and new task categories, see [Customization Guide](docs/CUSTOMIZATION.md). For internal flow and safety boundaries, see [Architecture](docs/ARCHITECTURE.md).
 

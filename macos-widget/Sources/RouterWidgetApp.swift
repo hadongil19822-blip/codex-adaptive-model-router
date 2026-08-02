@@ -40,6 +40,7 @@ struct DecisionState: Codable {
 
 struct RouterState: Codable {
     var threadId: String?
+    var taskName: String?
     var sessionPath: String?
     var cwd: String?
     var currentModel: String?
@@ -317,6 +318,8 @@ struct TaskCard: View {
     let task: RouterState
 
     private var projectName: String {
+        let taskName = task.taskName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !taskName.isEmpty { return taskName }
         guard let cwd = task.cwd, !cwd.isEmpty else { return "Unknown task" }
         return URL(fileURLWithPath: cwd).lastPathComponent
     }
@@ -464,6 +467,82 @@ struct TaskCard: View {
     }
 }
 
+struct RoutingControlCard: View {
+    @EnvironmentObject var model: RouterViewModel
+
+    private var routingBinding: Binding<Bool> {
+        Binding(
+            get: { model.isWatcherAlive },
+            set: { shouldRun in
+                guard shouldRun != model.isWatcherAlive else { return }
+                shouldRun ? model.startWatching() : model.stopWatching()
+            }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill((model.isWatcherAlive ? Color.green : Color.red).opacity(0.14))
+                    .frame(width: 38, height: 38)
+                Image(systemName: model.isWatcherAlive ? "bolt.fill" : "pause.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(model.isWatcherAlive ? Color.green : Color.red)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("AUTOMATIC ROUTING")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.48))
+                Text(model.isWatcherAlive ? "On · monitoring every active task" : "Off · no model changes will be made")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text("Turning this off does not stop work already running in Codex.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.white.opacity(0.38))
+            }
+
+            Spacer()
+
+            Toggle("Automatic routing", isOn: routingBinding)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(.green)
+                .disabled(model.isCommandRunning)
+                .help(model.isWatcherAlive ? "Turn automatic routing off" : "Turn automatic routing on")
+        }
+        .padding(13)
+        .background(
+            (model.isWatcherAlive ? Color.green : Color.red).opacity(0.075),
+            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke((model.isWatcherAlive ? Color.green : Color.red).opacity(0.24), lineWidth: 1)
+        }
+    }
+}
+
+struct UsageDial: View {
+    let remaining: Double
+    let warning: Bool
+
+    var body: some View {
+        Gauge(value: remaining, in: 0...100) {
+            Text("Weekly usage remaining")
+        } currentValueLabel: {
+            Text("\(Int(remaining.rounded()))%")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+        }
+        .gaugeStyle(.accessoryCircularCapacity)
+        .tint(warning ? Color.orange : Color.green)
+        .frame(width: 74, height: 74)
+        .accessibilityValue("\(Int(remaining.rounded())) percent remaining")
+    }
+}
+
 struct UsageCard: View {
     @EnvironmentObject var model: RouterViewModel
 
@@ -481,7 +560,12 @@ struct UsageCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            HStack(spacing: 13) {
+                UsageDial(
+                    remaining: remaining,
+                    warning: remaining <= model.guardThreshold && model.guardEnabled
+                )
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text("WEEKLY CODEX USAGE")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -489,6 +573,14 @@ struct UsageCard: View {
                     Text(model.usage?.available == true ? "\(Int(remaining.rounded()))% remaining" : "Usage unavailable")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
                         .foregroundStyle(remaining <= model.guardThreshold && model.guardEnabled ? Color.orange : Color.white)
+                    Text(resetText)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.42))
+                    if (model.usage?.resetCredits ?? 0) > 0 {
+                        Text("\(model.usage?.resetCredits ?? 0) reset credit")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.42))
+                    }
                 }
                 Spacer()
                 if model.usageGuard?.paused == true {
@@ -501,45 +593,85 @@ struct UsageCard: View {
                 }
             }
 
-            ProgressView(value: remaining, total: 100)
-                .tint(remaining <= 20 ? .orange : .green)
-
-            HStack {
-                Text(resetText)
-                Spacer()
-                if (model.usage?.resetCredits ?? 0) > 0 {
-                    Text("\(model.usage?.resetCredits ?? 0) reset credit")
-                }
-            }
-            .font(.system(size: 9, design: .monospaced))
-            .foregroundStyle(Color.white.opacity(0.42))
-
             Divider().overlay(Color.white.opacity(0.08))
 
-            Toggle("Pause new work when weekly usage is low", isOn: Binding(
-                get: { model.guardEnabled },
-                set: { model.guardEnabled = $0; model.guardSettingsDirty = true }
-            ))
-                .toggleStyle(.switch)
-                .font(.system(size: 11, weight: .medium))
-
             HStack {
-                Text("Pause at")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.white.opacity(0.55))
-                Slider(value: Binding(
-                    get: { model.guardThreshold },
-                    set: { model.guardThreshold = $0; model.guardSettingsDirty = true }
-                ), in: 1...50, step: 1)
-                    .disabled(!model.guardEnabled)
-                Text("\(Int(model.guardThreshold))%")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .frame(width: 34, alignment: .trailing)
-                Button("Save") { model.saveUsageGuard() }
-                    .buttonStyle(.bordered)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("USAGE SAFETY STOP")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.48))
+                    Text("Pause new prompts when weekly usage is low")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white)
+                }
+                Spacer()
+                Toggle("Usage safety stop", isOn: Binding(
+                    get: { model.guardEnabled },
+                    set: {
+                        model.guardEnabled = $0
+                        model.guardSettingsDirty = true
+                        model.saveUsageGuard()
+                    }
+                ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(.orange)
             }
 
-            Text("Safe mode: active turns finish; new prompts and automatic follow-ups pause at the threshold.")
+            HStack {
+                Text("STOP NEW WORK AT")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.48))
+                Spacer()
+                Text("\(Int(model.guardThreshold))% remaining")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(model.guardEnabled ? Color.orange : Color.white.opacity(0.35))
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    model.guardThreshold = max(1, model.guardThreshold - 1)
+                    model.guardSettingsDirty = true
+                    model.saveUsageGuard()
+                } label: {
+                    Image(systemName: "minus")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.bordered)
+                .help("Decrease stop percentage")
+
+                Slider(
+                    value: Binding(
+                        get: { model.guardThreshold },
+                        set: {
+                            model.guardThreshold = min(max($0, 1), 100)
+                            model.guardSettingsDirty = true
+                        }
+                    ),
+                    in: 1...100,
+                    step: 1,
+                    onEditingChanged: { editing in
+                        if !editing { model.saveUsageGuard() }
+                    }
+                )
+                .tint(.orange)
+                .accessibilityLabel("Stop new work percentage")
+                .accessibilityValue("\(Int(model.guardThreshold)) percent remaining")
+
+                Button {
+                    model.guardThreshold = min(100, model.guardThreshold + 1)
+                    model.guardSettingsDirty = true
+                    model.saveUsageGuard()
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.bordered)
+                .help("Increase stop percentage")
+            }
+            .disabled(!model.guardEnabled)
+
+            Text("Safe stop: active turns finish; new prompts and automatic follow-ups wait.")
                 .font(.system(size: 9))
                 .foregroundStyle(Color.white.opacity(0.38))
         }
@@ -573,6 +705,9 @@ struct ContentView: View {
                 StatusPill(alive: model.isWatcherAlive)
             }
 
+            RoutingControlCard()
+                .environmentObject(model)
+
             UsageCard()
                 .environmentObject(model)
 
@@ -591,33 +726,20 @@ struct ContentView: View {
 
             HStack(spacing: 9) {
                 Button {
-                    model.isWatcherAlive ? model.stopWatching() : model.startWatching()
-                } label: {
-                    Label(
-                        model.isWatcherAlive ? "Stop routing" : "Start routing",
-                        systemImage: model.isWatcherAlive ? "stop.fill" : "play.fill"
-                    )
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(model.isWatcherAlive ? .red.opacity(0.78) : .blue)
-                .disabled(model.isCommandRunning)
-
-                Button {
                     model.refresh()
                 } label: {
-                    Image(systemName: "arrow.clockwise")
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .help("Refresh status")
 
                 Button {
                     model.openRouterFolder()
                 } label: {
-                    Image(systemName: "folder")
+                    Label("Router folder", systemImage: "folder")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .help("Open router folder")
             }
 
             HStack(spacing: 6) {
@@ -665,6 +787,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        DispatchQueue.main.async { [weak self] in
+            self?.showMainWindow()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
